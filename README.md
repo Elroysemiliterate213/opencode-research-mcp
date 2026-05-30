@@ -10,24 +10,25 @@ LLMs waste tokens and make poor tool selections when drowning in redundant MCP t
 - **+260% selection probability** when tool descriptions are clear and non-redundant
 - **Linear context growth** — each additional MCP server adds ~3,000-5,000 tokens of tool descriptions to the context window
 
-The three upstream academic MCPs (`academix`, `paper-search-mcp`, `paper-distill-mcp`) provide overlapping search capabilities across 43+ combined tools. This bundle merges them into **12 curated tools** — a 72% reduction in tool surface area while preserving full capability.
+The three upstream academic MCPs (`academix`, `paper-search-mcp`, `paper-distill-mcp`) provide overlapping search capabilities across 43+ combined tools. This bundle merges them into **13 curated tools** — a 70% reduction in tool surface area while preserving full capability.
 
 ## What This Bundle Does
 
-| Tool | What It Does | Sources |
+| Tool | What It Does | When to Use |
 |---|---|---|
-| `search_literature` | Federated search across 6 major sources with dedup, query expansion, auto-citation walking, and optional Sci-Hub availability checking | Academix + Paper Search |
-| `paper_lookup` | Paper details by DOI, arXiv ID, OpenAlex ID, or Semantic Scholar ID | Academix + CrossRef |
-| `citation_intelligence` | Citing papers, references, related work, or full citation network graph | Academix (Semantic Scholar) |
-| `walk_citations` | Multi-hop citation chain walker (follow citation graphs N hops deep) | Academix |
-| `author_literature` | Find all papers by a specific author with year filters | Academix |
-| `export_bibliography` | BibTeX export with LaTeX-aware escaping and DBLP native lookup | Academix |
-| `search_specific_sources` | Direct source control — pick exactly which databases to query (including **Scopus** and **Springer**) | Paper Search + Publisher APIs |
-| `search_scihub` | Dedicated Sci-Hub download by DOI, title, PMID, or URL | Paper Search |
-| `read_paper` | Full-text PDF download + text extraction from 12+ open-access sources | Paper Search |
-| `batch_read` | Concurrent full-text extraction for multiple papers | Paper Search |
-| `curate_research` | Paper ranking, dedup filtering, review prompt generation | Paper Distill |
-| `paper_distill_pipeline` | Session management, topic preferences, Zotero collection, push digests | Paper Distill |
+| `search_literature` | Federated search across 6 major sources with dedup, query expansion, auto-citation walking | First step — find papers |
+| `paper_lookup` | Paper details by DOI, arXiv ID, OpenAlex ID, or Semantic Scholar ID | Need full metadata for a specific paper |
+| `citation_intelligence` | Citing papers, references, related work, or full citation network graph | Understand citation context |
+| `walk_citations` | Multi-hop citation chain walker (follow citation graphs N hops deep) | Find related work through citations |
+| `author_literature` | Find all papers by a specific author with year filters | Author-based search |
+| `export_bibliography` | BibTeX export with LaTeX-aware escaping and DBLP native lookup | Build bibliography |
+| `search_specific_sources` | Direct source control — pick exactly which databases to query (Scopus, Springer, etc.) | Need specific sources |
+| `search_scihub` | Dedicated Sci-Hub download by DOI, title, PMID, or URL | Need a specific paper |
+| `read_paper` | Full-text PDF download + text extraction from 12+ open-access sources | Need complete document |
+| `extract_sections` | **PRIMARY READING TOOL** — pull specific sections from full text (~80% token savings) | Read papers selectively |
+| `compare_papers` | Side-by-side comparison across multiple papers | Compare methods/findings |
+| `curate_research` | Paper ranking, dedup filtering, review prompt generation | Curate paper collections |
+| `paper_distill_pipeline` | Session management, topic preferences, Zotero collection, push digests | Manage recurring workflows |
 
 ## Architecture
 
@@ -45,7 +46,28 @@ The three upstream academic MCPs (`academix`, `paper-search-mcp`, `paper-distill
 └─────────────┴──────────────┴────────────┴───────────────┘
 ```
 
-The bundle uses `sys.path` injection to import from all three upstream packages in a single Python process. No subprocesses, no IPC — just direct function calls.
+## Agent Workflow
+
+This MCP is designed for a **multi-pass reading pattern**:
+
+```
+1. search_literature(query="RAG literature discovery")
+   → Returns 20 papers with metadata + abstracts
+
+2. extract_sections(papers[0].arxiv_id, sections=["methods","findings"])
+   → Returns ~3K tokens of relevant sections (not 15K full text)
+
+3. extract_sections(papers[1].arxiv_id, sections=["methods","findings"])
+   → Returns ~3K tokens of relevant sections
+
+4. compare_papers(papers=[p1, p2, p3], aspects=["method","finding"])
+   → Structured side-by-side comparison table
+
+5. read_paper(paper_id)  ← Only if you need the complete document
+   → Full text extraction
+```
+
+**Why this works:** The agent reads selectively (~9K tokens) instead of dumping all full text (~45K tokens). The attention mechanism works better with focused, structured information.
 
 ## Sources
 
@@ -70,10 +92,10 @@ For niche sources, use `search_specific_sources` — it can query any of these a
 - **Sci-Hub availability**: Optional `check_scihub=True` adds per-paper availability flag
 
 ### Full-Text Access
+- **Selective reading**: `extract_sections` pulls only the sections you need (~80% token savings)
 - **12 source-specific readers**: arXiv, Semantic Scholar, bioRxiv, medRxiv, IACR, OpenAIRE, CiteSeerX, DOAJ, BASE, Zenodo, HAL, Sci-Hub
 - **Smart fallback cascade**: Tries source-native → OA repositories → Unpaywall → Sci-Hub (optional)
 - **Springer OA fallback**: DOI→PDF via Springer Open Access API
-- **Dedicated Sci-Hub tool**: `search_scihub(identifier)` — direct download by DOI, title, PMID, or URL
 - **PDF text extraction**: Uses `pypdf` for page-by-page extraction
 
 ### Citation Analysis
@@ -154,22 +176,60 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-### Any MCP Client
+## API Key Setup
 
-The server runs on stdio transport. Point your MCP client at:
+All API keys are optional but recommended for better rate limits and access.
 
-```bash
-python /path/to/research_bundle.py
-```
+### Semantic Scholar (Recommended)
 
-## Environment Variables
+1. Go to [api.semanticscholar.org/api-docs/GraphQl](https://api.semanticscholar.org/api-docs/GraphQl)
+2. Click **"Get API Key"** in the top right
+3. Sign up with your email
+4. Copy your API key (format: `s2k-xxxxxxxxxxxx`)
+5. Set as `SEMANTIC_SCHOLAR_API_KEY` environment variable
+
+**Rate limits:** 1 req/sec (no key) → 10 req/sec (with key)
+
+### Unpaywall (Recommended)
+
+1. Go to [unpaywall.org/products/api](https://unpaywall.org/products/api)
+2. Enter your email address
+3. No signup required — just use your institutional email
+4. Set as `UNPAYWALL_EMAIL` environment variable
+
+**Why:** Unpaywall resolves DOIs to open-access PDF URLs. Using your institutional email may unlock additional OA copies.
+
+### Elsevier / Scopus (Optional)
+
+1. Go to [dev.elsevier.com](https://dev.elsevier.com/)
+2. Click **"Create API Key"**
+3. Fill in your details (name, email, institution)
+4. Select **"Scopus"** as the product
+5. Copy your API key (format: `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`)
+6. Set as `ELSEVIER_API_KEY` environment variable
+
+**What it enables:** Scopus search (26,000+ journals, 18M+ papers) via `search_specific_sources`
+
+### Springer Nature (Optional)
+
+1. Go to [dev.springernature.com](https://dev.springernature.com/)
+2. Click **"Register for an API Key"**
+3. Fill in your details
+4. Select **"Meta API"** and **"Open Access API"**
+5. Copy your API key (format: `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`)
+6. Set as `SPRINGER_API_KEY` environment variable
+
+**What it enables:** Springer Nature search + Open Access PDF resolution (29M+ papers)
+
+### All Environment Variables
 
 | Variable | Required | Description |
 |---|---|---|
 | `UNPAYWALL_EMAIL` | Recommended | Email for Unpaywall OA resolution. Use your institutional email for better access to paywalled papers. |
-| `SEMANTIC_SCHOLAR_API_KEY` | Recommended | Higher rate limits for Semantic Scholar (free key at [api.semanticscholar.org](https://api.semanticscholar.org/)) |
-| `ELSEVIER_API_KEY` | Optional | Enables Scopus search via Elsevier API (free key at [dev.elsevier.com](https://dev.elsevier.com/)) |
-| `SPRINGER_API_KEY` | Optional | Enables Springer Nature search and Open Access PDF resolution (free key at [dev.springernature.com](https://dev.springernature.com/)) |
+| `SEMANTIC_SCHOLAR_API_KEY` | Recommended | Higher rate limits for Semantic Scholar (10 req/sec vs 1 req/sec) |
+| `ELSEVIER_API_KEY` | Optional | Enables Scopus search via Elsevier API |
+| `SPRINGER_API_KEY` | Optional | Enables Springer Nature search and Open Access PDF resolution |
+| `ACADEMIX_EMAIL` | Optional | Email for Academix caching layer |
 
 ## Usage Examples
 
@@ -185,18 +245,26 @@ year_from: 2020           # only papers from 2020 onwards
 check_scihub: true        # add Sci-Hub availability to results
 ```
 
-### Find papers by author
+### Read specific sections (recommended)
 
 ```
-author_literature(author_name="Yann LeCun", year_from=2020)
+extract_sections(paper_id="2305.14283", sections=["methods", "findings"])
 ```
 
-### Read a paper's full text
+### Read full paper (only when needed)
 
 ```
-read_paper(paper_id="2305.14283")  # arXiv ID auto-detected
-read_paper(paper_id="10.1038/s41586-020-2649-2", source="auto")  # DOI
-read_paper(paper_id="10.1038/s41586-020-2649-2", use_scihub=True)  # with Sci-Hub fallback
+read_paper(paper_id="2305.14283")
+read_paper(paper_id="10.1038/s41586-020-2649-2", use_scihub=True)
+```
+
+### Compare papers
+
+```
+compare_papers(
+    papers=[{arxiv_id: "2305.14283"}, {doi: "10.1038/s41586-020-2649-2"}],
+    aspects=["method", "finding", "limitation"]
+)
 ```
 
 ### Walk citation chains
@@ -204,8 +272,8 @@ read_paper(paper_id="10.1038/s41586-020-2649-2", use_scihub=True)  # with Sci-Hu
 ```
 walk_citations(
     paper_id="2305.14283",
-    direction="forward",    # who cited this paper?
-    depth=2,                # 2 hops deep
+    direction="forward",
+    depth=2,
     max_papers_per_hop=10
 )
 ```
@@ -229,20 +297,20 @@ search_specific_sources(
 ### Download via Sci-Hub
 
 ```
-search_scihub(identifier="10.1038/s41586-020-2649-2")  # by DOI
-search_scihub(identifier="Attention Is All You Need")   # by title
+search_scihub(identifier="10.1038/s41586-020-2649-2")
 ```
 
 ## Tool Comparison
 
 | Capability | Separate MCPs (3 servers) | This Bundle (1 server) |
 |---|---|---|
-| Tool count | 43+ tools | 12 tools |
-| Context tokens | ~15,000 | ~4,000 |
+| Tool count | 43+ tools | 13 tools |
+| Context tokens | ~15,000 | ~4,500 |
 | Search sources | 21+ | 21+ (same) |
 | Cross-source dedup | Manual | Automatic |
 | Citation walking | Manual (separate calls) | Auto (built into search) |
 | Query expansion | None | Built-in |
+| Selective reading | None | extract_sections (~80% savings) |
 | Sci-Hub availability | None | Per-paper check |
 | Process count | 3 | 1 |
 | Tool selection accuracy | Lower (redundant names) | Higher (unique names) |
@@ -256,8 +324,8 @@ Benchmarked on a representative search query:
 | Search latency | ~16s (6 sources in parallel) |
 | Papers returned | 20 (deduplicated from ~80 raw) |
 | Top result citations | 643 |
-| Context tokens | ~4,000 (vs ~15,000 for separate MCPs) |
-| Tool surface | 12 (vs 43+ for separate MCPs) |
+| Context tokens | ~4,500 (vs ~15,000 for separate MCPs) |
+| Tool surface | 13 (vs 43+ for separate MCPs) |
 
 ## Research Basis
 
@@ -266,6 +334,7 @@ This bundle design is informed by:
 - **Wang et al. 2026** — ["From Docs to Descriptions"](https://arxiv.org/abs/2602.18914) — MCP description quality study of 10,831 servers. Found that 73% have repeated tool names and clear descriptions give +260% selection probability.
 - **Dunkel 2026** — [DADL](https://arxiv.org/abs/2605.05247) — Progressive tool disclosure for token efficiency. Demonstrated linear context growth with tool count.
 - **Hou et al. 2026** — ["MCP Landscape"](https://arxiv.org/abs/2504.14947) — Security threats and future directions for MCP. Identified 16 threat scenarios across 4 categories.
+- **Gan & Sun 2025** — [RAG-MCP](https://arxiv.org/abs/2505.03275) — Retrieval-augmented tool selection for MCP. Reduces prompt tokens by 50%+ and triples selection accuracy.
 
 ## Upstream Packages
 
@@ -277,7 +346,7 @@ This bundle design is informed by:
 
 ## Contributing
 
-Contributions welcome. The bundle is intentionally thin (~850 lines) — it delegates to upstream packages. Changes should keep the tool surface compact.
+Contributions welcome. The bundle is intentionally thin (~1200 lines) — it delegates to upstream packages. Changes should keep the tool surface compact.
 
 ## License
 

@@ -332,10 +332,11 @@ async def search_literature(
     cite_walk_max_papers: int = 3,
     check_scihub: bool = False,
 ) -> dict[str, Any]:
-    """Best default literature search across 6 major academic sources.
+    """Search 6 major academic sources, deduplicate, rank, and optionally walk citations.
 
-    Queries arXiv, Semantic Scholar, OpenAlex, CrossRef, PubMed, and Unpaywall
-    in parallel, then deduplicates and ranks by cross-source hits + citation count.
+    Returns paper metadata (title, authors, year, abstract, DOI, citation count, is_open_access).
+    Use extract_sections to read specific sections from papers (saves ~80% tokens vs full text).
+    Use read_paper only when you need the complete document.
 
     For niche sources (DBLP, bioRxiv, IEEE, etc.) use search_specific_sources.
 
@@ -816,6 +817,9 @@ async def read_paper(
 ) -> dict[str, Any]:
     """Download and extract full text from a paper.
 
+    USE extract_sections FIRST for selective reading (saves ~80% tokens).
+    Only use this when you need the complete document (e.g., for detailed analysis, figures, or appendices).
+
     source = "auto" auto-detects from paper_id format. Explicit sources: arxiv, semantic, biorxiv, medrxiv, iacr, openaire, citeseerx, doaj, base, zenodo, hal.
     Falls back through: native source -> OA repositories -> Unpaywall -> Sci-Hub (when enabled).
     Returns extracted text content plus metadata.
@@ -1040,13 +1044,19 @@ async def extract_sections(
     doi: str = "",
     title: str = "",
 ) -> dict[str, Any]:
-    """Extract specific sections from a paper's full text without returning the entire document.
+    """Extract specific sections from a paper's full text (RECOMMENDED for reading papers).
 
-    This is the recommended way to read papers — returns only the sections you need,
-    saving ~80% of tokens compared to full-text read.
+    Returns only the sections you need, saving ~80% of tokens compared to read_paper.
+    Use this BEFORE read_paper. Only use read_paper when you need the complete document.
 
     Available sections: abstract, introduction, methods, results, discussion,
     conclusions, related_work, limitations, future_work.
+
+    Typical workflow:
+    1. search_literature(query="...")  → find papers
+    2. extract_sections(paper_id, sections=["abstract","methods"])  → read selectively
+    3. compare_papers(papers, aspects=["method","finding"])  → compare across papers
+    4. read_paper(paper_id)  → only if full text is truly needed
 
     Args:
         paper_id: arXiv ID, DOI, or other paper identifier
@@ -1157,66 +1167,6 @@ async def compare_papers(
         "paper_count": len(comparisons),
         "aspects": aspects,
         "comparisons": comparisons,
-    }
-
-
-@mcp.tool()
-async def batch_read(
-    papers: list[dict[str, Any]],
-    save_path: str = "./downloads",
-    max_concurrent: int = 3,
-) -> dict[str, Any]:
-    """Download and extract full text for multiple papers concurrently.
-
-    Each paper dict should have at minimum: title + one of (doi, arxiv_id, paper_id).
-    Returns dict with success/failure counts and extracted texts keyed by paper title.
-    """
-    semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def _read_one(paper: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        title = paper.get("title", "unknown")
-        async with semaphore:
-            paper_id = (
-                paper.get("arxiv_id")
-                or paper.get("doi")
-                or paper.get("paper_id")
-                or title
-            )
-            source = _detect_source_from_paper(paper)
-            try:
-                result = await read_paper(
-                    paper_id=paper_id,
-                    source=source or "auto",
-                    doi=paper.get("doi", ""),
-                    title=title,
-                    save_path=save_path,
-                )
-                return title, result
-            except Exception as exc:
-                return title, {"success": False, "error": str(exc)}
-
-    tasks = [_read_one(p) for p in papers if p.get("title") or p.get("doi")]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    texts: dict[str, Any] = {}
-    succeeded = 0
-    failed = 0
-    for r in results:
-        if isinstance(r, Exception):
-            failed += 1
-            continue
-        title, detail = r
-        texts[title] = detail
-        if detail.get("success"):
-            succeeded += 1
-        else:
-            failed += 1
-
-    return {
-        "total": len(papers),
-        "succeeded": succeeded,
-        "failed": failed,
-        "texts": texts,
     }
 
 
