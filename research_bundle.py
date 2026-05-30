@@ -863,28 +863,87 @@ async def read_paper(
         result["download_error"] = str(exc)
         result["success"] = False
 
-    # Springer OA fallback (if DOI provided and main download failed)
+    # Additional OA fallbacks (if DOI provided and main download failed)
     if not result.get("success") and doi:
+        from publisher_apis import _get_client
+        client = await _get_client()
+
+        # Try OpenAlex OA URL (has open_access.oa_url for many papers)
         try:
-            oa_url = await springer_resolve_oa(doi)
+            oa_url = None
+            resp = await client.get(
+                f"https://api.openalex.org/works/doi:{doi}",
+                params={"mailto": os.environ.get("UNPAYWALL_EMAIL", "research@example.com")},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                oa_info = data.get("open_access", {})
+                oa_url = oa_info.get("oa_url")
+                if not oa_url:
+                    primary = data.get("primary_location", {})
+                    if primary and primary.get("pdf_url"):
+                        oa_url = primary["pdf_url"]
             if oa_url:
-                from publisher_apis import _get_client
-                client = await _get_client()
-                resp = await client.get(oa_url, timeout=30.0)
-                if resp.status_code == 200 and (
-                    "pdf" in resp.headers.get("content-type", "")
-                    or resp.content[:5] == b"%PDF-"
+                pdf_resp = await client.get(oa_url, timeout=30.0)
+                if pdf_resp.status_code == 200 and (
+                    "pdf" in pdf_resp.headers.get("content-type", "")
+                    or pdf_resp.content[:5] == b"%PDF-"
                 ):
                     from pathlib import Path as _P
                     out_dir = _P(save_path)
                     out_dir.mkdir(parents=True, exist_ok=True)
                     out_file = out_dir / f"{paper_id.replace('/', '_')}.pdf"
-                    out_file.write_bytes(resp.content)
+                    out_file.write_bytes(pdf_resp.content)
                     result["download_path"] = str(out_file)
                     result["success"] = True
-                    result["springer_oa_url"] = oa_url
+                    result["oa_source"] = "openalex"
+                    return result
         except Exception:
             pass
+
+        # Try Springer OA
+        try:
+            oa_url = await springer_resolve_oa(doi)
+            if oa_url:
+                pdf_resp = await client.get(oa_url, timeout=30.0)
+                if pdf_resp.status_code == 200 and (
+                    "pdf" in pdf_resp.headers.get("content-type", "")
+                    or pdf_resp.content[:5] == b"%PDF-"
+                ):
+                    from pathlib import Path as _P
+                    out_dir = _P(save_path)
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    out_file = out_dir / f"{paper_id.replace('/', '_')}.pdf"
+                    out_file.write_bytes(pdf_resp.content)
+                    result["download_path"] = str(out_file)
+                    result["success"] = True
+                    result["oa_source"] = "springer"
+                    return result
+        except Exception:
+            pass
+
+        # Try multi-mirror Sci-Hub (if enabled)
+        if use_scihub:
+            import httpx as _httpx
+            sci_hub_urls = ["https://sci-hub.se", "https://sci-hub.st", "https://sci-hub.ru"]
+            for mirror in sci_hub_urls:
+                try:
+                    async with _httpx.AsyncClient(follow_redirects=True, timeout=15.0) as sc:
+                        resp = await sc.get(f"{mirror}/{doi}")
+                        if resp.status_code == 200:
+                            ct = resp.headers.get("content-type", "").lower()
+                            if "pdf" in ct or resp.content[:5] == b"%PDF-":
+                                from pathlib import Path as _P
+                                out_dir = _P(save_path)
+                                out_dir.mkdir(parents=True, exist_ok=True)
+                                out_file = out_dir / f"{paper_id.replace('/', '_')}.pdf"
+                                out_file.write_bytes(resp.content)
+                                result["download_path"] = str(out_file)
+                                result["success"] = True
+                                result["oa_source"] = f"scihub:{mirror}"
+                                return result
+                except Exception:
+                    continue
 
     return result
 
@@ -908,6 +967,197 @@ async def search_scihub(
         result["error"] = str(exc)
         result["success"] = False
     return result
+
+
+def _extract_sections_from_text(text: str, sections: list[str]) -> dict[str, str]:
+    """Extract specific sections from paper full text using heading patterns."""
+    import re
+
+    # Common section heading patterns in academic papers
+    section_patterns = {
+        "abstract": r"(?i)^\s*(?:#{1,3}\s*)?(?:abstract|summary)\s*$",
+        "introduction": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?introduction\s*$",
+        "methods": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:methods?|methodology|materials?\s+(?:and|&)\s+methods?|experimental(?:\s+(?:setup|procedure|section))?|approach)\s*$",
+        "results": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:results?|findings?|experiments?|evaluation|empirical\s+results?)\s*$",
+        "discussion": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:discussion|analysis|interpretation)\s*$",
+        "conclusions": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:conclusions?|concluding\s+remarks?|summary\s+and\s+conclusions?|final\s+remarks?)\s*$",
+        "related_work": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:related\s+work|background|prior\s+work|previous\s+work|literature\s+review|survey)\s*$",
+        "limitations": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:limitations?|threats|validity)\s*$",
+        "future_work": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:future\s+work|future\s+directions?|outlook|next\s+steps?)\s*$",
+    }
+
+    # Build section index: find all heading positions
+    lines = text.split("\n")
+    headings: list[tuple[int, str, str]] = []  # (line_idx, section_key, raw_heading)
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or len(stripped) > 200:
+            continue
+        for key, pattern in section_patterns.items():
+            if re.match(pattern, stripped):
+                headings.append((i, key, stripped))
+                break
+
+    if not headings:
+        # No structured headings found — try to extract abstract at minimum
+        abstract_match = re.search(
+            r"(?i)abstract[:\s]*(.{200,2000}?)(?:\n\s*\n|introduction|keywords|1\.)",
+            text,
+            re.DOTALL,
+        )
+        result = {}
+        if "abstract" in sections and abstract_match:
+            result["abstract"] = abstract_match.group(1).strip()
+        if not result:
+            result["_note"] = "No structured section headings found in paper text"
+        return result
+
+    # Extract requested sections
+    extracted: dict[str, str] = {}
+    for i, (line_idx, section_key, _) in enumerate(headings):
+        if section_key not in sections:
+            continue
+        # Find the end of this section (next heading or end of text)
+        if i + 1 < len(headings):
+            end_idx = headings[i + 1][0]
+        else:
+            end_idx = len(lines)
+        section_text = "\n".join(lines[line_idx + 1 : end_idx]).strip()
+        # Truncate very long sections
+        if len(section_text) > 3000:
+            section_text = section_text[:3000] + "\n...[truncated]"
+        extracted[section_key] = section_text
+
+    return extracted
+
+
+@mcp.tool()
+async def extract_sections(
+    paper_id: str,
+    sections: list[str] | None = None,
+    source: str = "auto",
+    doi: str = "",
+    title: str = "",
+) -> dict[str, Any]:
+    """Extract specific sections from a paper's full text without returning the entire document.
+
+    This is the recommended way to read papers — returns only the sections you need,
+    saving ~80% of tokens compared to full-text read.
+
+    Available sections: abstract, introduction, methods, results, discussion,
+    conclusions, related_work, limitations, future_work.
+
+    Args:
+        paper_id: arXiv ID, DOI, or other paper identifier
+        sections: Which sections to extract (default: abstract + methods + conclusions)
+        source: Source to read from (auto-detect if omitted)
+        doi: DOI for fallback resolution
+        title: Title for fallback resolution
+    """
+    if sections is None:
+        sections = ["abstract", "methods", "conclusions"]
+
+    # Read the paper
+    read_result = await read_paper(
+        paper_id=paper_id, source=source, doi=doi, title=title,
+    )
+
+    if not read_result.get("success") or not read_result.get("text"):
+        return {
+            "paper_id": paper_id,
+            "success": False,
+            "error": read_result.get("error") or read_result.get("download_error") or "Could not retrieve full text",
+            "extracted": {},
+        }
+
+    text = read_result["text"]
+    extracted = _extract_sections_from_text(text, sections)
+
+    return {
+        "paper_id": paper_id,
+        "success": True,
+        "source": read_result.get("source"),
+        "sections_requested": sections,
+        "sections_found": list(extracted.keys()),
+        "extracted": extracted,
+    }
+
+
+@mcp.tool()
+async def compare_papers(
+    papers: list[dict[str, Any]],
+    aspects: list[str] | None = None,
+) -> dict[str, Any]:
+    """Compare multiple papers side-by-side on specific aspects.
+
+    Reads each paper and extracts the requested aspects for comparison.
+    Returns a structured comparison table.
+
+    Args:
+        papers: List of paper dicts (need paper_id + title at minimum)
+        aspects: What to compare (default: ["method", "finding", "limitation"])
+    """
+    if aspects is None:
+        aspects = ["method", "finding", "limitation"]
+
+    aspect_to_section = {
+        "method": "methods",
+        "finding": "results",
+        "limitation": "limitations",
+        "conclusion": "conclusions",
+        "related_work": "related_work",
+        "future_work": "future_work",
+        "abstract": "abstract",
+    }
+
+    sections_needed = list(set(
+        aspect_to_section.get(a, a) for a in aspects
+    ))
+
+    comparisons: list[dict[str, Any]] = []
+
+    for paper in papers:
+        paper_id = (
+            paper.get("arxiv_id")
+            or paper.get("doi")
+            or paper.get("paper_id")
+            or paper.get("title", "")
+        )
+        extract_result = await extract_sections(
+            paper_id=paper_id,
+            sections=sections_needed,
+            doi=paper.get("doi", ""),
+            title=paper.get("title", ""),
+        )
+
+        # Map extracted sections back to requested aspects
+        aspect_data: dict[str, str] = {}
+        for a in aspects:
+            section_key = aspect_to_section.get(a, a)
+            content = extract_result.get("extracted", {}).get(section_key, "")
+            if content:
+                # Truncate for comparison
+                if len(content) > 800:
+                    content = content[:800] + "..."
+                aspect_data[a] = content
+            else:
+                aspect_data[a] = "[not found]"
+
+        comparisons.append({
+            "title": paper.get("title", "Unknown"),
+            "doi": paper.get("doi"),
+            "year": paper.get("year"),
+            "success": extract_result.get("success", False),
+            "aspects": aspect_data,
+        })
+
+    return {
+        "aspect_count": len(aspects),
+        "paper_count": len(comparisons),
+        "aspects": aspects,
+        "comparisons": comparisons,
+    }
 
 
 @mcp.tool()
