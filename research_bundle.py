@@ -15,33 +15,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+TOOL_SITE_PACKAGES = [
+    Path.home() / "AppData" / "Roaming" / "uv" / "tools" / "paper-distill-mcp" / "Lib" / "site-packages",
+    Path.home() / "AppData" / "Roaming" / "uv" / "tools" / "paper-search-mcp" / "Lib" / "site-packages",
+    Path.home() / "AppData" / "Roaming" / "uv" / "tools" / "academix" / "Lib" / "site-packages",
+]
 
-def _find_tool_site_packages() -> list[Path]:
-    """Find uv tool site-packages directories for the three upstream servers."""
-    candidates = []
-    if sys.platform == "win32":
-        base = Path.home() / "AppData" / "Roaming" / "uv" / "tools"
-        for tool, subdir in [
-            ("paper-distill-mcp", "Lib/site-packages"),
-            ("paper-search-mcp", "Lib/site-packages"),
-            ("academix", "Lib/site-packages"),
-        ]:
-            candidates.append(base / tool / subdir)
-    else:
-        base = Path.home() / ".local" / "share" / "uv" / "tools"
-        for tool in ["paper-distill-mcp", "paper-search-mcp", "academix"]:
-            for py_dir in sorted((base / tool).glob("lib/python3.*"), reverse=True):
-                sp = py_dir / "site-packages"
-                if sp.exists():
-                    candidates.append(sp)
-                    break
-    return [p for p in candidates if p.exists()]
-
-
-for _sp in reversed(_find_tool_site_packages()):
-    _sp_str = str(_sp)
-    if _sp_str not in sys.path:
-        sys.path.insert(0, _sp_str)
+for site_packages in reversed(TOOL_SITE_PACKAGES):
+    site_path = str(site_packages)
+    if site_packages.exists() and site_path not in sys.path:
+        sys.path.insert(0, site_path)
 
 from fastmcp import FastMCP  # noqa: E402
 
@@ -185,12 +168,7 @@ def _merge_papers(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any
     return ranked[:limit]
 
 
-def _source_profile(profile: str) -> str:
-    profiles = {
-        "fast": "arxiv,semantic,openalex,crossref,dblp,pubmed,google_scholar,unpaywall",
-        "broad": "arxiv,semantic,openalex,crossref,dblp,pubmed,pmc,europepmc,core,openaire,doaj,base,hal,zenodo,ssrn,google_scholar,biorxiv,medrxiv,iacr,citeseerx,unpaywall",
-    }
-    return profiles.get(profile, profile)
+BEST_SOURCES = "arxiv,semantic,openalex,crossref,pubmed,unpaywall"
 
 
 def _expand_query(query: str) -> list[str]:
@@ -249,27 +227,27 @@ async def search_literature(
     max_results: int = 20,
     year_from: int | None = None,
     year_to: int | None = None,
-    profile: Literal["fast", "broad"] | str = "fast",
     expand_queries: bool = True,
     auto_cite_walk: bool = True,
     cite_walk_depth: int = 1,
     cite_walk_max_papers: int = 3,
 ) -> dict[str, Any]:
-    """Best default literature search. Combines Academix + Paper Search across overlapping backends.
+    """Best default literature search across 6 major academic sources.
 
-    Returns deduplicated, merged results sorted by cross-source hits + citation count.
-    Each paper has: title, year, doi, authors, abstract, source, citation_count, etc.
+    Queries arXiv, Semantic Scholar, OpenAlex, CrossRef, PubMed, and Unpaywall
+    in parallel, then deduplicates and ranks by cross-source hits + citation count.
+
+    For niche sources (DBLP, bioRxiv, IEEE, etc.) use search_specific_sources.
 
     Args:
         query: Search query string
         max_results: Maximum results to return (default 20)
         year_from: Filter papers from this year
         year_to: Filter papers until this year
-        profile: "fast" (8 best sources) or "broad" (21 sources, slower)
-        expand_queries: Auto-expand acronyms (LLM->large language model) for broader recall
-        auto_cite_walk: Auto-walk citation graph for top results to find related work
-        cite_walk_depth: How many hops to follow in citation graph (1=direct citations only)
-        cite_walk_max_papers: How many top papers to walk citations for (default 3)
+        expand_queries: Auto-expand acronyms (LLM->large language model)
+        auto_cite_walk: Auto-walk citation graph for top results
+        cite_walk_depth: Citation graph walk depth (1=direct citations only)
+        cite_walk_max_papers: How many top papers to walk citations for
     """
     year = None
     if year_from and year_to:
@@ -295,7 +273,7 @@ async def search_literature(
             paper_search.search_papers(
                 query=q,
                 max_results_per_source=max(3, min(max_results, 30)),
-                sources=_source_profile(str(profile)),
+                sources=BEST_SOURCES,
                 year=year,
             ),
         ])
@@ -328,7 +306,6 @@ async def search_literature(
     result = {
         "query": query,
         "queries_used": queries,
-        "profile": profile,
         "total_before_dedupe": len(papers),
         "returned": len(merged),
         "errors": errors,
@@ -588,7 +565,7 @@ async def read_paper(
     try:
         path = await paper_search.download_with_fallback(
             source=source, paper_id=paper_id, doi=doi, title=title,
-            save_path=save_path, use_scihub=False,
+            save_path=save_path, use_scihub=True,
         )
         result["download_path"] = path
         result["success"] = path is not None
@@ -660,7 +637,7 @@ async def batch_read(
 
 
 # ---------------------------------------------------------------------------
-# Curation tools (Paper Distill)
+# Curation tools
 # ---------------------------------------------------------------------------
 
 @mcp.tool()

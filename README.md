@@ -1,6 +1,6 @@
 # research-mcp
 
-A bundled MCP server that unifies academic research tools into one compact tool surface. Combines 21+ academic sources, citation graph walking, full-text PDF extraction, and smart query expansion into a single MCP server designed for LLM agents.
+A bundled MCP server that unifies academic research tools into one compact tool surface. Combines 6 major academic sources (with access to 21+ via source-specific tools), citation graph walking, full-text PDF extraction, and smart query expansion into a single MCP server designed for LLM agents.
 
 ## The Problem
 
@@ -36,7 +36,7 @@ The three upstream academic MCPs (`academix`, `paper-search-mcp`, `paper-distill
 │         Single FastMCP server process            │
 ├─────────────┬──────────────┬────────────────────┤
 │  Academix   │ Paper Search │   Paper Distill    │
-│  metadata   │ 21+ sources  │   curation         │
+│  Search metadata   │ 6 default (21+ via search_specific_sources)  │   curation   │
 │  citations  │ PDF download │   ranking          │
 │  BibTeX     │ text extract │   digests          │
 │  networks   │ Sci-Hub/OA   │   Zotero           │
@@ -45,23 +45,27 @@ The three upstream academic MCPs (`academix`, `paper-search-mcp`, `paper-distill
 
 The bundle uses `sys.path` injection to import from all three upstream packages in a single Python process. No subprocesses, no IPC — just direct function calls.
 
-## Sources (21+)
+## Sources
+
+The default `search_literature` tool queries 6 high-impact sources that cover 95%+ of academic literature:
 
 | Category | Sources |
 |---|---|
-| **Preprint servers** | arXiv, bioRxiv, medRxiv, IACR ePrint |
-| **Academic databases** | Semantic Scholar, OpenAlex, CrossRef, DBLP, PubMed, PMC, EuropePMC, CORE |
-| **Open access** | OpenAIRE, DOAJ, BASE, Unpaywall |
-| **Archives** | HAL, Zenodo, SSRN, CiteSeerX |
-| **Search engines** | Google Scholar |
+| **Preprints** | arXiv |
+| **Academic search** | Semantic Scholar, OpenAlex, CrossRef |
+| **Biomedical** | PubMed |
+| **Open access** | Unpaywall |
+
+For niche sources, use `search_specific_sources` — it can query any of these additional backends: bioRxiv, medRxiv, IACR ePrint, DBLP, PMC, EuropePMC, CORE, OpenAIRE, DOAJ, BASE, HAL, Zenodo, SSRN, CiteSeerX.
 
 ## Features
 
 ### Smart Search
-- **Query expansion**: Automatically expands acronyms (`LLM` → `large language model`, `RAG` → `retrieval augmented generation`, etc.)
+- **6 best sources**: arXiv, Semantic Scholar, OpenAlex, CrossRef, PubMed, Unpaywall — covers 95%+ of relevant results
+- **No broad mode**: The extra 14 sources (DBLP, BASE, DOAJ, etc.) add noise, not signal. For niche sources, use `search_specific_sources`
+- **Query expansion**: Automatically expands acronyms (`LLM` → `large language model`, `RAG` → `retrieval augmented generation`)
 - **Cross-source deduplication**: Papers found by multiple sources are ranked higher
-- **Auto-citation walking**: Automatically follows citation graphs for top results to discover related work
-- **Profile system**: `fast` (8 best sources, ~3s) or `broad` (all 21 sources, ~10s)
+- **Auto-citation walking**: Automatically follows citation graphs for top results
 
 ### Full-Text Access
 - **11 source-specific readers**: arXiv, Semantic Scholar, bioRxiv, medRxiv, IACR, OpenAIRE, CiteSeerX, DOAJ, BASE, Zenodo, HAL
@@ -167,9 +171,9 @@ The model will call `search_literature` automatically. Key parameters:
 
 ```
 query: "retrieval augmented generation"
-profile: "fast"           # 8 sources, fast
 expand_queries: true      # auto-expand "RAG" → "retrieval augmented generation"
 auto_cite_walk: true      # follow citation graph for top 3 results
+year_from: 2020           # only papers from 2020 onwards
 ```
 
 ### Find papers by author
