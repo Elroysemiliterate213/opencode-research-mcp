@@ -65,16 +65,18 @@ Most academic MCPs return everything they find. research-mcp **ranks and filters
 | **Scopus** (conditional) | ~90% | Curated 26K+ journal index |
 | **Springer** (conditional) | ~n/a | Open Access API (Metadata API key expired) |
 
-### Noisy Sources (Explicitly Excluded by Default)
+### Noisy Sources (Excluded by Default for Precision-Optimised Search)
 
-| Source | Precision (benchmarked) | Why Excluded |
-|--------|------------------------|--------------|
-| bioRxiv | **0%** | Neuroscience only — never relevant to education queries |
-| medRxiv | **0%** | Epidemiology only — never relevant |
-| PubMed | ~30% | Biomedical bias across all queries |
-| Europe PMC | ~17% | Biomedical noise, ~83% irrelevant |
+These sources are excluded from `search_literature`'s default source list because they returned near-zero precision in our domain. They may be valuable for other research domains (biomedical, clinical, neuroscience); enable them via `search_specific_sources` if needed.
+
+| Source | Precision (our benchmark) | Why Excluded by Default |
+|--------|--------------------------|------------------------|
+| bioRxiv | **0%** | Neuroscience preprints — never matched our queries |
+| medRxiv | **0%** | Epidemiology preprints — never matched our queries |
+| PubMed | ~30% | Biomedical only — useful for medical queries, not general academic search |
+| Europe PMC | ~17% | Biomedical noise for non-medical queries |
 | Zenodo | **crashes** | `'str' object has no attribute 'isoformat'` on every query |
-| Core | ~11% | Proceedings junk |
+| Core | ~11% | Proceedings — low relevance outside CS/engineering |
 
 ## 8 Tools
 
