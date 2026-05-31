@@ -337,11 +337,13 @@ async def search_literature(
     cite_walk_depth: int = 1,
     cite_walk_max_papers: int = 3,
     check_scihub: bool = False,
+    compact: bool = False,
 ) -> dict[str, Any]:
-    """Search up to 8 academic sources, deduplicate, and optionally walk citations.
+    """Search across 6-8 academic sources, deduplicate, and optionally walk citations.
 
     Base sources (always active): arXiv, Semantic Scholar, OpenAlex, CrossRef, PubMed, Unpaywall.
     Conditional sources (when API keys set): Scopus (ELSEVIER_API_KEY), Springer (SPRINGER_API_KEY).
+    Excludes noisy sources (bioRxiv, medRxiv) by default — use search_specific_sources for those.
 
     Returns paper metadata (title, authors, year, abstract, DOI, citation count, is_open_access).
     Includes BOTH seminal older papers AND recent papers. Do NOT filter by year unless the
@@ -349,7 +351,6 @@ async def search_literature(
     than recent ones.
 
     Use extract_sections to read specific sections from papers (saves ~80% tokens vs full text).
-    Use read_paper only when you need the complete document.
 
     Args:
         query: Search query string
@@ -357,6 +358,7 @@ async def search_literature(
         year_from: Filter papers from this year — ONLY set if user explicitly asks for recency
         year_to: Filter papers until this year — ONLY set if user explicitly asks for recency
         expand_queries: Auto-expand acronyms (LLM->large language model)
+        compact: Return minimal data (no abstracts, shorter citation) — saves ~70% tokens
         auto_cite_walk: Auto-walk citation graph for top results
         cite_walk_depth: Citation graph walk depth (1=direct citations only)
         cite_walk_max_papers: How many top papers to walk citations for
@@ -549,6 +551,10 @@ async def search_literature(
         except Exception:
             pass
 
+    if compact:
+        for p in result.get("papers", []):
+            p.pop("abstract", None)
+            p["compact"] = True
     _search_cache.set(result, *cache_key)
     return result
 

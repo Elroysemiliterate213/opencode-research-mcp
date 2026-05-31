@@ -1,0 +1,413 @@
+{
+  "metadata": {
+    "generated": "2026-05-31T14:25:00",
+    "description": "MCP benchmark: academix (MCP1) vs paper-search (MCP2) vs bundled research (MCP3)",
+    "queries": 8,
+    "mcps_tested": 3,
+    "query_numbers": ["Q3","Q4","Q5","Q6","Q7","Q8","Q9","Q10"]
+  },
+  "results": {
+    "Q3": {
+      "query": "AI feedback uptake revision quality meta-analysis",
+      "mcp1_academix": {
+        "returned_count": 15,
+        "total_results": 3056,
+        "with_abstracts": 14,
+        "estimated_relevant": 4,
+        "top_3_titles": [
+          "European Guidelines on cardiovascular disease prevention in clinical practice (version 2012): The Fifth Joint Task Force of the European Society of Cardiology...",
+          "2015 ESC Guidelines for the management of acute coronary syndromes in patients presenting without persistent ST-segment elevation",
+          "The future landscape of large language models in medicine"
+        ],
+        "errors": null
+      },
+      "mcp2_papersearch": {
+        "returned_count": 38,
+        "with_abstracts": 34,
+        "estimated_relevant": 12,
+        "top_3_titles": [
+          "Foundations of GenIR",
+          "AI prediction leads people to forgo guaranteed rewards",
+          "Competing Visions of Ethical AI: A Case Study of OpenAI"
+        ],
+        "errors": {
+          "zenodo": "'str' object has no attribute 'isoformat'"
+        },
+        "source_results": {
+          "arxiv": 5, "pubmed": 0, "biorxiv": 5, "medrxiv": 5,
+          "google_scholar": 0, "iacr": 0, "semantic": 0, "crossref": 5,
+          "openalex": 5, "pmc": 0, "core": 5, "europepmc": 5,
+          "dblp": 0, "openaire": 3, "citeseerx": 0, "doaj": 0,
+          "base": 0, "zenodo": 0, "hal": 0, "ssrn": 0, "unpaywall": 0
+        }
+      },
+      "mcp3_bundled": {
+        "returned_count": 15,
+        "with_abstracts": 15,
+        "estimated_relevant": 9,
+        "top_3_titles": [
+          "AI prediction leads people to forgo guaranteed rewards",
+          "Competing Visions of Ethical AI: A Case Study of OpenAI",
+          "AI chatbots versus human healthcare professionals: a systematic review and meta-analysis of empathy in patient care"
+        ],
+        "errors": {}
+      }
+    },
+    "Q4": {
+      "query": "automated feedback classifier DeBERTa educational text",
+      "mcp1_academix": {
+        "returned_count": 15,
+        "total_results": 289,
+        "with_abstracts": 15,
+        "estimated_relevant": 5,
+        "top_3_titles": [
+          "Large language models (LLMs): survey, technical frameworks, and future challenges",
+          "Large Language Model as Attributed Training Data Generator: A Tale of Diversity and Bias",
+          "Conversational artificial intelligence in the AEC industry: A review of present status, challenges and opportunities"
+        ],
+        "errors": null
+      },
+      "mcp2_papersearch": {
+        "returned_count": 41,
+        "with_abstracts": 31,
+        "estimated_relevant": 19,
+        "top_3_titles": [
+          "amc: The Automated Mission Classifier for Telescope Bibliographies",
+          "A review of clustering models in educational data science towards fairness-aware learning",
+          "DeBERTa: Decoding-enhanced BERT with Disentangled Attention"
+        ],
+        "errors": {
+          "zenodo": "'str' object has no attribute 'isoformat'"
+        },
+        "source_results": {
+          "arxiv": 5, "pubmed": 0, "biorxiv": 5, "medrxiv": 5,
+          "google_scholar": 0, "iacr": 0, "semantic": 0, "crossref": 5,
+          "openalex": 5, "pmc": 5, "core": 5, "europepmc": 5,
+          "dblp": 0, "openaire": 1, "citeseerx": 0, "doaj": 0,
+          "base": 0, "zenodo": 0, "hal": 0, "ssrn": 0, "unpaywall": 0
+        }
+      },
+      "mcp3_bundled": {
+        "returned_count": 15,
+        "with_abstracts": 15,
+        "estimated_relevant": 10,
+        "top_3_titles": [
+          "From Red Pen to Algorithm: How Do L2 Learners Engage with Human and Automated Feedback?",
+          "From Vulnerability to Defense: The Role of Large Language Models in Enhancing Cybersecurity",
+          "Feedback from Generative AI: Correlates of Student Engagement in Text Revision from 655 Classes from Primary and Secondary School"
+        ],
+        "errors": {}
+      }
+    },
+    "Q5": {
+      "query": "feedback literacy intervention training evaluative judgement",
+      "mcp1_academix": {
+        "returned_count": 15,
+        "total_results": 18268,
+        "with_abstracts": 12,
+        "estimated_relevant": 5,
+        "top_3_titles": [
+          "PRISMA 2020 explanation and elaboration: updated guidance and exemplars for reporting systematic reviews",
+          "Knowledge translation of research findings",
+          "Opinion Paper: \"So what if ChatGPT wrote it?\" Multidisciplinary perspectives on opportunities, challenges and implications of generative conversational AI for research, practice and policy"
+        ],
+        "errors": null
+      },
+      "mcp2_papersearch": {
+        "returned_count": 35,
+        "with_abstracts": 27,
+        "estimated_relevant": 12,
+        "top_3_titles": [
+          "An Experiential Approach to AI Literacy",
+          "Towards Measuring Interactive Visualization Abilities: Connecting With Existing Literacies and Assessments",
+          "Computer and Internet Literacy Course of the College of Computer Science for the Municipality of Agoo, La Union"
+        ],
+        "errors": {
+          "pubmed": "not well-formed (invalid token): line 1, column 0",
+          "zenodo": "'str' object has no attribute 'isoformat'"
+        },
+        "source_results": {
+          "arxiv": 5, "pubmed": 0, "biorxiv": 5, "medrxiv": 5,
+          "google_scholar": 0, "iacr": 0, "semantic": 0, "crossref": 5,
+          "openalex": 5, "pmc": 0, "core": 5, "europepmc": 5,
+          "dblp": 0, "openaire": 0, "citeseerx": 0, "doaj": 0,
+          "base": 0, "zenodo": 0, "hal": 0, "ssrn": 0, "unpaywall": 0
+        }
+      },
+      "mcp3_bundled": {
+        "returned_count": 15,
+        "with_abstracts": 15,
+        "estimated_relevant": 8,
+        "top_3_titles": [
+          "An Experiential Approach to AI Literacy",
+          "Towards Measuring Interactive Visualization Abilities: Connecting With Existing Literacies and Assessments",
+          "Assessing Data Literacy in K-12 Education: Challenges and Opportunities"
+        ],
+        "errors": {}
+      }
+    },
+    "Q6": {
+      "query": "LLM self-assessment bias self-enhancement",
+      "mcp1_academix": {
+        "returned_count": 15,
+        "total_results": 34749,
+        "with_abstracts": 15,
+        "estimated_relevant": 6,
+        "top_3_titles": [
+          "Large language models encode clinical knowledge",
+          "Performance of ChatGPT on USMLE: Potential for AI-assisted medical education using large language models",
+          "ChatGPT Utility in Healthcare Education, Research, and Practice: Systematic Review on the Promising Perspectives and Valid Concerns"
+        ],
+        "errors": null
+      },
+      "mcp2_papersearch": {
+        "returned_count": 35,
+        "with_abstracts": 27,
+        "estimated_relevant": 15,
+        "top_3_titles": [
+          "Bias and Unfairness in Information Retrieval Systems: New Challenges in the LLM Era",
+          "Perception-Aware Bias Detection for Query Suggestions",
+          "Gender Bias of LLM in Economics: An Existentialism Perspective"
+        ],
+        "errors": {
+          "zenodo": "'str' object has no attribute 'isoformat'"
+        },
+        "source_results": {
+          "arxiv": 5, "pubmed": 0, "biorxiv": 5, "medrxiv": 5,
+          "google_scholar": 0, "iacr": 0, "semantic": 0, "crossref": 5,
+          "openalex": 5, "pmc": 5, "core": 0, "europepmc": 5,
+          "dblp": 0, "openaire": 1, "citeseerx": 0, "doaj": 0,
+          "base": 0, "zenodo": 0, "hal": 0, "ssrn": 0, "unpaywall": 0
+        }
+      },
+      "mcp3_bundled": {
+        "returned_count": 15,
+        "with_abstracts": 15,
+        "estimated_relevant": 14,
+        "top_3_titles": [
+          "A Survey of Large Language Models",
+          "Perception-Aware Bias Detection for Query Suggestions",
+          "It's the humans, not the data: Geopolitical bias in LLMs originates in post-training, amplified by the language of the prompt"
+        ],
+        "errors": {}
+      }
+    },
+    "Q7": {
+      "query": "spaced micro-learning AI feedback evaluation",
+      "mcp1_academix": {
+        "returned_count": 15,
+        "total_results": 42659,
+        "with_abstracts": 12,
+        "estimated_relevant": 2,
+        "top_3_titles": [
+          "Diagnosing Non-Intermittent Anomalies in Reinforcement Learning Policy Executions (Short Paper)",
+          "Review of deep learning: concepts, CNN architectures, challenges, applications, future directions",
+          "Learning analytics and AI: Politics, pedagogy and practices"
+        ],
+        "errors": null
+      },
+      "mcp2_papersearch": {
+        "returned_count": 34,
+        "with_abstracts": 31,
+        "estimated_relevant": 9,
+        "top_3_titles": [
+          "AI prediction leads people to forgo guaranteed rewards",
+          "Foundations of GenIR",
+          "Competing Visions of Ethical AI: A Case Study of OpenAI"
+        ],
+        "errors": {
+          "pubmed": "not well-formed (invalid token): line 1, column 0",
+          "zenodo": "'str' object has no attribute 'isoformat'"
+        },
+        "source_results": {
+          "arxiv": 5, "pubmed": 0, "biorxiv": 5, "medrxiv": 5,
+          "google_scholar": 0, "iacr": 0, "semantic": 0, "crossref": 5,
+          "openalex": 5, "pmc": 0, "core": 3, "europepmc": 5,
+          "dblp": 0, "openaire": 1, "citeseerx": 0, "doaj": 0,
+          "base": 0, "zenodo": 0, "hal": 0, "ssrn": 0, "unpaywall": 0
+        }
+      },
+      "mcp3_bundled": {
+        "returned_count": 15,
+        "with_abstracts": 14,
+        "estimated_relevant": 5,
+        "top_3_titles": [
+          "AI prediction leads people to forgo guaranteed rewards",
+          "Competing Visions of Ethical AI: A Case Study of OpenAI",
+          "Evaluating AI Meeting Summaries with a Reusable Cross-Domain Pipeline"
+        ],
+        "errors": {}
+      }
+    },
+    "Q8": {
+      "query": "metacognitive laziness AI student learning",
+      "mcp1_academix": {
+        "returned_count": 15,
+        "total_results": 889,
+        "with_abstracts": 14,
+        "estimated_relevant": 15,
+        "top_3_titles": [
+          "Beware of metacognitive laziness: Effects of generative artificial intelligence on learning motivation, processes, and performance",
+          "Hybrid intelligence: Human-AI coevolution and learning",
+          "Shortcut to Knowledge or Shortcut to Thinking? Investigating AI-Induced Metacognitive Laziness in Future Doctors"
+        ],
+        "errors": null
+      },
+      "mcp2_papersearch": {
+        "returned_count": 38,
+        "with_abstracts": 35,
+        "estimated_relevant": 35,
+        "top_3_titles": [
+          "DeBiasMe: De-biasing Human-AI Interactions with Metacognitive AIED (AI in Education) Interventions",
+          "Bridging Declarative, Procedural, and Conditional Metacognitive Knowledge Gap Using Deep Reinforcement Learning",
+          "AI prediction leads people to forgo guaranteed rewards"
+        ],
+        "errors": {
+          "zenodo": "'str' object has no attribute 'isoformat'"
+        },
+        "source_results": {
+          "arxiv": 5, "pubmed": 0, "biorxiv": 5, "medrxiv": 5,
+          "google_scholar": 0, "iacr": 0, "semantic": 0, "crossref": 5,
+          "openalex": 5, "pmc": 0, "core": 5, "europepmc": 5,
+          "dblp": 0, "openaire": 5, "citeseerx": 0, "doaj": 0,
+          "base": 0, "zenodo": 0, "hal": 0, "ssrn": 0, "unpaywall": 0
+        }
+      },
+      "mcp3_bundled": {
+        "returned_count": 15,
+        "with_abstracts": 15,
+        "estimated_relevant": 15,
+        "top_3_titles": [
+          "Beware of metacognitive laziness: Effects of generative artificial intelligence on learning motivation, processes, and performance",
+          "AI prediction leads people to forgo guaranteed rewards",
+          "Competing Visions of Ethical AI: A Case Study of OpenAI"
+        ],
+        "errors": {}
+      }
+    },
+    "Q9": {
+      "query": "uptake taxonomy feedback L2 writing revision decisions",
+      "mcp1_academix": {
+        "returned_count": 15,
+        "total_results": 197,
+        "with_abstracts": 14,
+        "estimated_relevant": 12,
+        "top_3_titles": [
+          "Effects of manipulating task complexity on self-repairs during L2 oral production",
+          "Language Teaching during a Pandemic: A Case Study of Zoom Use by a Secondary ESL Teacher in Hong Kong",
+          "Task complexity, the cognition hypothesis, and interaction in CMC and FTF environments"
+        ],
+        "errors": null
+      },
+      "mcp2_papersearch": {
+        "returned_count": 34,
+        "with_abstracts": 25,
+        "estimated_relevant": 15,
+        "top_3_titles": [
+          "A Taxonomy of Errors in English as she is spoke: Toward an AI-Based Method of Error Analysis for EFL Writing Instruction",
+          "LLMs as Writing Assistants: Exploring Perspectives on Sense of Ownership and Reasoning",
+          "Voice Interaction With Conversational AI Could Facilitate Thoughtful Reflection and Substantive Revision in Writing"
+        ],
+        "errors": {
+          "zenodo": "'str' object has no attribute 'isoformat'"
+        },
+        "source_results": {
+          "arxiv": 5, "pubmed": 0, "biorxiv": 5, "medrxiv": 5,
+          "google_scholar": 0, "iacr": 0, "semantic": 0, "crossref": 5,
+          "openalex": 5, "pmc": 0, "core": 5, "europepmc": 5,
+          "dblp": 0, "openaire": 0, "citeseerx": 0, "doaj": 0,
+          "base": 0, "zenodo": 0, "hal": 0, "ssrn": 0, "unpaywall": 0
+        }
+      },
+      "mcp3_bundled": {
+        "returned_count": 15,
+        "with_abstracts": 15,
+        "estimated_relevant": 14,
+        "top_3_titles": [
+          "COMPARATIVE EFFECTIVENESS OF AI-GENERATED AND PEER FEEDBACK ON L2 WRITING PERFORMANCE",
+          "Refining L2 Learner Agency through Multi-role Prompting: A Coordination Framework for AI-Mediated Writing Peer Feedback",
+          "Developing a Technology-Mediated Feedback Loop for PBL-Based Senior High EFL Writing"
+        ],
+        "errors": {}
+      }
+    },
+    "Q10": {
+      "query": "hybrid AI human feedback writing accuracy",
+      "mcp1_academix": {
+        "returned_count": 15,
+        "total_results": 28309,
+        "with_abstracts": 11,
+        "estimated_relevant": 5,
+        "top_3_titles": [
+          "Systematic review of research on artificial intelligence applications in higher education \u2013 where are the educators?",
+          "Data clustering",
+          "Opinion Paper: \u201cSo what if ChatGPT wrote it?\u201d Multidisciplinary perspectives on opportunities, challenges and implications of generative conversational AI for research, practice and policy"
+        ],
+        "errors": null
+      },
+      "mcp2_papersearch": {
+        "returned_count": 37,
+        "with_abstracts": 30,
+        "estimated_relevant": 17,
+        "top_3_titles": [
+          "Designing AI Systems that Augment Human Performed vs. Demonstrated Critical Thinking",
+          "DeBiasMe: De-biasing Human-AI Interactions with Metacognitive AIED (AI in Education) Interventions",
+          "Needs-aware Artificial Intelligence: AI that 'serves [human] needs'"
+        ],
+        "errors": {
+          "zenodo": "'str' object has no attribute 'isoformat'"
+        },
+        "source_results": {
+          "arxiv": 5, "pubmed": 0, "biorxiv": 5, "medrxiv": 5,
+          "google_scholar": 0, "iacr": 0, "semantic": 0, "crossref": 5,
+          "openalex": 5, "pmc": 0, "core": 2, "europepmc": 5,
+          "dblp": 0, "openaire": 5, "citeseerx": 0, "doaj": 0,
+          "base": 0, "zenodo": 0, "hal": 0, "ssrn": 0, "unpaywall": 0
+        }
+      },
+      "mcp3_bundled": {
+        "returned_count": 15,
+        "with_abstracts": 15,
+        "estimated_relevant": 14,
+        "top_3_titles": [
+          "Knowledge Affordances for Hybrid Human-AI Information Seeking",
+          "AI Phenomenology for Understanding Human-AI Experiences Across Eras",
+          "Cognitive Amplification vs Cognitive Delegation in Human-AI Systems: A Metric Framework"
+        ],
+        "errors": {}
+      }
+    }
+  },
+  "summary_across_queries": {
+    "mcp1_academix": {
+      "avg_returned": 15.0,
+      "avg_with_abstracts": 13.4,
+      "avg_estimated_relevant": 6.75,
+      "avg_total_results": 19839.5,
+      "total_returned": 120
+    },
+    "mcp2_papersearch": {
+      "avg_returned": 36.5,
+      "avg_with_abstracts": 30.0,
+      "avg_estimated_relevant": 16.75,
+      "total_returned": 292
+    },
+    "mcp3_bundled": {
+      "avg_returned": 15.0,
+      "avg_with_abstracts": 14.9,
+      "avg_estimated_relevant": 11.1,
+      "total_returned": 120
+    }
+  },
+  "error_patterns": {
+    "mcp1_academix": {
+      "errors_observed": "None"
+    },
+    "mcp2_papersearch": {
+      "errors_observed": "zenodo: 'str' object has no attribute 'isoformat' (7/8 queries); pubmed: not well-formed (2/8 queries)"
+    },
+    "mcp3_bundled": {
+      "errors_observed": "None"
+    }
+  }
+}
