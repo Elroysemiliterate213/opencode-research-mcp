@@ -670,6 +670,120 @@ async def export_bibliography(paper_ids: list[str], use_dblp: bool = True) -> st
 
 
 @mcp.tool()
+async def export_references(
+    papers: list[dict[str, Any]],
+    format: Literal["ris", "csv", "json", "bibtex"] = "ris",
+) -> str:
+    """Export paper references in RIS, CSV, JSON, or BibTeX format.
+
+    RIS works with EndNote, Zotero, Mendeley.
+    CSV works with spreadsheets and literature matrices.
+    JSON preserves all metadata fields.
+    BibTeX for LaTeX documents.
+
+    Args:
+        papers: List of paper dicts (from search_literature results)
+        format: Output format
+    """
+    lines: list[str] = []
+
+    if format == "ris":
+        for p in papers:
+            lines.append("TY  - JOUR")
+            if p.get("title"):
+                lines.append(f"TI  - {p['title']}")
+            for author in (p.get("authors") or []):
+                lines.append(f"AU  - {author}")
+            if p.get("year"):
+                lines.append(f"PY  - {p['year']}")
+            if p.get("doi"):
+                lines.append(f"DO  - {p['doi']}")
+            if p.get("venue"):
+                lines.append(f"JO  - {p['venue']}")
+            if p.get("abstract"):
+                lines.append(f"AB  - {p['abstract']}")
+            if p.get("url"):
+                lines.append(f"UR  - {p['url']}")
+            if p.get("arxiv_id"):
+                lines.append(f"AN  - arXiv:{p['arxiv_id']}")
+            lines.append("ER  - ")
+            lines.append("")
+        return "\n".join(lines)
+
+    elif format == "csv":
+        lines.append("title,authors,year,doi,url,venue,arxiv_id,citation_count")
+        for p in papers:
+            authors = "; ".join(p.get("authors") or [])
+            title = (p.get("title") or "").replace(",", ";")
+            lines.append(
+                f'"{title}","{authors}",{p.get("year") or ""},{p.get("doi") or ""},'
+                f'{p.get("url") or ""},{p.get("venue") or ""},'
+                f'{p.get("arxiv_id") or ""},{p.get("citation_count") or 0}'
+            )
+        return "\n".join(lines)
+
+    elif format == "json":
+        return json.dumps(papers, indent=2, default=str)
+
+    elif format == "bibtex":
+        return await export_bibliography(
+            paper_ids=[
+                p.get("doi") or p.get("arxiv_id") or p.get("paper_id", "")
+                for p in papers
+                if p.get("doi") or p.get("arxiv_id") or p.get("paper_id")
+            ]
+        )
+
+    return "Unsupported format"
+
+
+@mcp.tool()
+async def search_by_title(
+    title: str,
+    max_results: int = 5,
+) -> dict[str, Any]:
+    """Find a paper by title. Searches across Semantic Scholar, CrossRef, and arXiv.
+
+    Use when you have a paper title but no DOI or arXiv ID.
+    Returns the best matching papers with metadata.
+    """
+    results: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+
+    # Search Semantic Scholar by title
+    try:
+        s2_results = await _retry_async(
+            lambda: academix_server.academic_search_papers(
+                query=f'title:"{title}"',
+                sort="relevance",
+                limit=max_results,
+                response_format="json",
+            )
+        )
+        data = _json_load(s2_results)
+        for p in data.get("papers", []) if isinstance(data, dict) else []:
+            results.append(_normalize_paper(p, "semantic-scholar-title"))
+    except Exception as exc:
+        errors["semantic_scholar"] = str(exc)
+
+    # Search CrossRef by title
+    try:
+        cr_results = await paper_search.get_crossref_paper_by_doi(title)
+        if cr_results and isinstance(cr_results, dict):
+            results.append(_normalize_paper(cr_results, "crossref-title"))
+    except Exception:
+        pass
+
+    merged = _merge_papers(results, max_results)
+    return {
+        "query": title,
+        "results_found": len(merged),
+        "errors": errors,
+        "papers": merged,
+    }
+
+
+@mcp.tool()
 async def search_specific_sources(
     query: str,
     sources: str,
