@@ -238,6 +238,8 @@ SOURCE_PRECISION_BONUS = {
     "academix": 1,
     "arxiv": 1,
     "semantic": 1,
+    "scopus": 2,
+    "springer": 2,
     "europepmc": 0,
     "pubmed": 0,
     "crossref": 0,
