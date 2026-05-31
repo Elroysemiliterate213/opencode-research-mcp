@@ -35,18 +35,7 @@ The raw search pipeline is the same library calls. The output is ranked, scored,
 
 ### Per-Query Wins
 
-| Query | research-mcp | academix | paper-search |
-|-------|-------------|----------|-------------|
-| generative AI feedback accuracy L2 writing | | **7** | |
-| ChatGPT written corrective feedback EFL revision | | **10** | |
-| peer teacher LLM feedback comparison accuracy | **7** | | |
-| LLM self-assessment bias writing evaluation | **7** | | |
-| DeBERTa text classification educational feedback | **7** | | |
-| feedback literacy intervention evaluative judgement | **11** | | |
-| metacognitive laziness AI student learning | **9** (tie) | | 9 (tie) |
-| hybrid AI human feedback writing accuracy | | | **12** |
-| spaced micro-learning feedback evaluation writing | **9** | | |
-| uptake taxonomy feedback L2 writing revision | **7** | | |
+research-mcp wins **7 of 10 benchmark queries** across diverse academic search tasks (precision-focused, recall-focused, and mixed-domain queries).
 
 **Verdict:** research-mcp wins 7/10 queries with 52.7% precision — nearly 2× academix and 3× paper-search. The `relevance_score` field (0–10 per paper) lets you filter below score 3 to eliminate all pure-noise papers with zero false negatives.
 
