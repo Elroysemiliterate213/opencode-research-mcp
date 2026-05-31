@@ -298,7 +298,7 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
     return ranked[:limit]
 
 
-BEST_SOURCES = "arxiv,semantic,openalex,crossref,pubmed,unpaywall,openaire"
+BEST_SOURCES = "arxiv,semantic,openalex,crossref,pubmed,unpaywall,openaire,europepmc"
 
 
 def _expand_query(query: str) -> list[str]:
@@ -370,11 +370,12 @@ async def search_literature(
     check_scihub: bool = False,
     compact: bool = False,
 ) -> dict[str, Any]:
-    """Search across 6-8 academic sources, deduplicate, and optionally walk citations.
+    """Search across 8 academic sources, deduplicate, and walk citations.
 
-    Base sources (always active): arXiv, Semantic Scholar, OpenAlex, CrossRef, PubMed, Unpaywall.
+    Base sources (always active): arXiv, Semantic Scholar, OpenAlex, CrossRef,
+    PubMed, Unpaywall, OpenAIRE, Europe PMC.
     Conditional sources (when API keys set): Scopus (ELSEVIER_API_KEY), Springer (SPRINGER_API_KEY).
-    Excludes noisy sources (bioRxiv, medRxiv) by default — use search_specific_sources for those.
+    Excludes noisy sources (bioRxiv, medRxiv) by default.
 
     Returns paper metadata (title, authors, year, abstract, DOI, citation count, is_open_access).
     Ranks results by: multi-source agreement, relevance score (title overlap + citation boost),
@@ -482,8 +483,11 @@ async def search_literature(
     }
 
     if auto_cite_walk and merged:
+        # Walk by citation count — ensures highly-cited papers are walked, which
+        # surfaces their references (classics) and citing papers (follow-on work)
+        walk_candidates = sorted(merged, key=lambda p: -_to_int(p.get("citation_count")))
         walk_ids = []
-        for p in merged[:cite_walk_max_papers]:
+        for p in walk_candidates[:cite_walk_max_papers]:
             if p.get("source_hits", 0) >= 2:  # Only walk papers found by multiple sources
                 pid = p.get("doi") or p.get("arxiv_id") or p.get("paper_id")
                 if pid:
@@ -494,11 +498,11 @@ async def search_literature(
             try:
                 citations_data = _json_load(
                     await academix_server.academic_get_citations(
-                        pid, limit=5, response_format="json"
+                        pid, limit=10, response_format="json"
                     )
                 )
                 citing = citations_data.get("citing_papers", []) if isinstance(citations_data, dict) else []
-                return [_normalize_paper(cp, "citation-walk-s2") for cp in citing[:5]]
+                return [_normalize_paper(cp, "citation-walk-s2") for cp in citing[:10]]
             except Exception:
                 return []
 
@@ -515,7 +519,7 @@ async def search_literature(
                     f"https://api.openalex.org/works",
                     params={
                         "filter": f"cites:{doi}",
-                        "per_page": 5,
+                        "per_page": 10,
                         "mailto": oa_email,
                     },
                 )
@@ -524,7 +528,7 @@ async def search_literature(
                 data = resp.json()
                 results = data.get("results", [])
                 papers = []
-                for r in results[:5]:
+                for r in results[:10]:
                     authors = []
                     for a in (r.get("authorships") or [])[:5]:
                         name = (a.get("author") or {}).get("display_name", "")
@@ -572,16 +576,16 @@ async def search_literature(
                 if not refs:
                     return []
                 # Batch fetch referenced works
-                ids_param = "|".join(refs[:10])
+                ids_param = "|".join(refs[:20])
                 ref_resp = await client.get(
                     "https://api.openalex.org/works",
-                    params={"filter": f"ids:{ids_param}", "per_page": 10, "mailto": oa_email},
+                    params={"filter": f"ids:{ids_param}", "per_page": 20, "mailto": oa_email},
                 )
                 if ref_resp.status_code != 200:
                     return []
                 results = ref_resp.json().get("results", [])
                 papers = []
-                for r in results[:5]:
+                for r in results[:10]:
                     authors = []
                     for a in (r.get("authorships") or [])[:5]:
                         name = (a.get("author") or {}).get("display_name", "")
@@ -625,9 +629,20 @@ async def search_literature(
                 citation_papers.extend(r)
 
         if citation_papers:
-            # Citation papers get a lower rank weight by marking their source
+            # Citation walk papers get source_hits floor of 2 so they compete in ranking
             for cp in citation_papers:
                 cp["citation_walk"] = True
+                cp["source_hits"] = max(_to_int(cp.get("source_hits")), 2)
+                # Recompute relevance_score with citation boost
+                cites = _to_int(cp.get("citation_count"))
+                score = _to_int(cp.get("relevance_score"))
+                if cites >= 500:
+                    score = min(score + 3, 10)
+                elif cites >= 100:
+                    score = min(score + 2, 10)
+                elif cites >= 50:
+                    score = min(score + 1, 10)
+                cp["relevance_score"] = score
             all_papers = merged + citation_papers
             result["papers"] = _merge_papers(all_papers, max_results + 10, query)
             result["citation_walk_found"] = len(citation_papers)
