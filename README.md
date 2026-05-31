@@ -1,8 +1,14 @@
 # research-mcp
 
-A precision-optimised MCP server that unifies 8 academic sources into 8 curated tools with **relevance scoring, citation-weighted ranking, and source precision weighting** — designed for rigorous literature search across academic domains.
+A research plugin that improves on the two best existing academic search plugins (academix and paper-search) by adding relevance scoring, citation-weighted ranking, source filtering, and automated citation walking.
 
-Benchmarked across **30 runs (10 queries × 3 MCPs)** against standalone `academix` and `paper-search-mcp` using real academic queries.
+**What it does:** You ask a research question, it searches 8 academic databases at once, removes duplicates, ranks results by how well they match your query, and returns the best 15 papers with a relevance score for each. It also automatically finds papers your results cite (and papers that cite them) so you don't miss foundational or follow-up work.
+
+**Why it's better:** The existing plugins return 15 papers but only ~4 are on-topic — the rest is noise from biomedical sources like PubMed (papers that happen to mention "feedback" in a clinical context) or bioRxiv (neuroscience preprints sharing a keyword). research-mcp filters those out before ranking, so ~8 of 15 papers are actually useful. That's **53% precision vs 27% (academix) and 16% (paper-search)**.
+
+**Token savings:** It replaces 65 tools from two plugins with 8 tools. The agent spends ~400 tokens browsing tools instead of ~12,000 — most of its context budget goes to research instead of navigating tool menus.
+
+Benchmarked across **30 runs (10 queries × 3 MCPs)** against standalone `academix` and `paper-search-mcp`.
 
 ## Benchmark: V4 (10 Queries, 30 Runs — 2026-05-31)
 
