@@ -1,6 +1,6 @@
 # research-mcp
 
-A bundled MCP server that unifies 9 academic sources into 8 curated tools for LLM research agents. Benchmarked across 30 runs (10 queries × 3 MCPs) against standalone `academix` and `paper-search-mcp`.
+A bundled MCP server that unifies 9 academic sources (7 base + 2 conditional) into 8 curated tools for LLM research agents. Benchmarked across 30 runs (10 queries × 3 MCPs) against standalone `academix` and `paper-search-mcp`.
 
 ## Benchmark (30 Runs, 10 Queries)
 
@@ -20,7 +20,7 @@ A bundled MCP server that unifies 9 academic sources into 8 curated tools for LL
 
 | # | Tool | Purpose |
 |---|------|---------|
-| 1 | `search_literature` | 8 sources, dedup, auto citation walk, **compact mode** |
+| 1 | `search_literature` | 9 sources (7 base + 2 conditional), dedup, auto citation walk, **compact mode** |
 | 2 | `paper_lookup` | DOI/arXiv/title → metadata (auto-detect) |
 | 3 | `walk_citations` | Multi-hop citation chain (S2 + OpenAlex) |
 | 4 | `author_literature` | Search by author |
@@ -31,7 +31,7 @@ A bundled MCP server that unifies 9 academic sources into 8 curated tools for LL
 
 **Tool surface:** ~400 tokens (vs ~12,000 for 3 separate MCPs)
 
-## 8 Sources
+## 7 Base + 2 Conditional Sources
 
 | Source | Type | Key Required? |
 |--------|------|---------------|
@@ -41,6 +41,7 @@ A bundled MCP server that unifies 9 academic sources into 8 curated tools for LL
 | CrossRef | DOI resolution | No |
 | PubMed | Biomedical | No |
 | Unpaywall | OA PDF resolver | Email recommended |
+| **OpenAIRE** | **EU open science** | **No** |
 | Scopus | 26K+ journals | Elsevier API key |
 | Springer Nature | 29M+ papers | Springer API key |
 
@@ -91,7 +92,7 @@ pip install -e .
 ## Usage
 
 ```python
-# Search (8 sources, auto cite-walk). Use compact=True to save tokens.
+# Search (9 sources, auto cite-walk). Use compact=True to save tokens.
 search_literature(query="online writing L2 research", max_results=15)
 search_literature(query="online writing L2 research", compact=True)
 
