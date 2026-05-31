@@ -53,17 +53,18 @@ Most academic MCPs return everything they find. research-mcp **ranks and filters
 | **relevance_score ≥3 filter** | Removes papers with zero term match + <50 citations | Zero false negatives in 150-paper benchmark |
 | **No noisy sources** | Excludes bioRxiv, medRxiv, PubMed, Europe PMC, Zenodo | Eliminates 0%-precision biomedical noise |
 
-### Selected Sources and Their Precision
+### Selected Sources
 
-| Source | Precision | Why Included |
-|--------|-----------|-------------|
-| **OpenAlex** (via academix) | ~60% | Sole OpenAlex backend — citation-weighted ranking |
-| **arXiv** | ~53% | Best for recent CS/education preprints |
-| **OpenAIRE** | ~100% | European OA research — sparse but gold when it matches |
-| **Semantic Scholar** | ~55% | Recent academic papers with citation data |
-| **CrossRef** | ~40% | Broad DOI-based coverage |
-| **Scopus** (conditional) | ~90% | Curated 26K+ journal index |
-| **Springer** (conditional) | ~n/a | Open Access API (Metadata API key expired) |
+| Source | Type | Notes |
+|--------|------|-------|
+| **OpenAlex** | Bibliographic (270M+) | Queried via academix with citation-weighted sort |
+| **arXiv** | Preprints | Recent CS, ML, education preprints |
+| **Semantic Scholar** | Academic search | Recent papers with citation data |
+| **OpenAIRE** | EU open science | High-precision OA research across European repositories |
+| **CrossRef** | DOI resolution | Broad metadata coverage |
+| **Unpaywall** | OA PDF resolver | Enables open access full-text links |
+| **Scopus** (conditional) | 26K+ journals | Requires Elsevier API key |
+| **Springer** (conditional) | 29M+ papers | Open Access API (Metadata API key expired) |
 
 ### Noisy Sources (Excluded by Default for Precision-Optimised Search)
 
