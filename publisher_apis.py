@@ -248,9 +248,10 @@ async def search_springer(
     year_from: str | None = None,
     year_to: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search Springer Nature via Meta API.
+    """Search Springer Nature via Open Access API.
 
-    Requires SPRINGER_API_KEY env var.
+    Requires SPRINGER_API_KEY env var (Open Access key).
+    Returns only OA content — fewer papers but actually works.
     """
     api_key = os.environ.get("SPRINGER_API_KEY", "")
     if not api_key:
@@ -273,7 +274,7 @@ async def search_springer(
 
     try:
         client = await _get_client()
-        resp = await client.get(SPRINGER_BASE, params=params)
+        resp = await client.get(SPRINGER_OA_BASE, params=params)
         resp.raise_for_status()
         data = resp.json()
     except Exception:

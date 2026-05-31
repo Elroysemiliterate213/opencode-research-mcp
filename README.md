@@ -58,17 +58,17 @@ Most academic MCPs return everything they find. research-mcp **ranks and filters
 | **Semantic Scholar** | ~55% | Recent academic papers with citation data |
 | **CrossRef** | ~40% | Broad DOI-based coverage |
 | **Scopus** (conditional) | ~90% | Curated 26K+ journal index |
-| **Springer** (conditional) | ~85% | Publisher-grade content |
+| **Springer** (conditional) | ~n/a | Open Access API (Metadata API key expired) |
 
-### Excluded Sources (Benchmark-Proven Noise)
+### Noisy Sources (Explicitly Excluded by Default)
 
-| Source | Precision | Why Excluded |
-|--------|-----------|-------------|
-| bioRxiv | **0%** | Neuroscience only — never relevant |
+| Source | Precision (benchmarked) | Why Excluded |
+|--------|------------------------|--------------|
+| bioRxiv | **0%** | Neuroscience only — never relevant to education queries |
 | medRxiv | **0%** | Epidemiology only — never relevant |
-| PubMed | ~30% | Biomedical bias |
-| Europe PMC | ~17% | Biomedical noise |
-| Zenodo | **crashes** | Error every query |
+| PubMed | ~30% | Biomedical bias across all queries |
+| Europe PMC | ~17% | Biomedical noise, ~83% irrelevant |
+| Zenodo | **crashes** | `'str' object has no attribute 'isoformat'` on every query |
 | Core | ~11% | Proceedings junk |
 
 ## 8 Tools
@@ -138,12 +138,14 @@ pip install -e .
 
 ### API Keys
 
-| Key | Source | What It Enables |
-|-----|--------|----------------|
-| Semantic Scholar | [api.semanticscholar.org](https://api.semanticscholar.org/) | 10 req/sec (vs 1/sec shared) |
-| Unpaywall | Your institutional email | OA PDF resolution |
-| Elsevier/Scopus | [dev.elsevier.com](https://dev.elsevier.com/) | Scopus search (26K+ journals) |
-| Springer Nature | [dev.springernature.com](https://dev.springernature.com/) | Springer search + OA PDF |
+| Key | Source | Status | What It Enables |
+|-----|--------|--------|----------------|
+| Semantic Scholar | [api.semanticscholar.org](https://api.semanticscholar.org/) | ✅ Required | 10 req/sec (vs 1/sec shared) |
+| Unpaywall | Your institutional email | ✅ Recommended | OA PDF resolution |
+| Elsevier/Scopus | [dev.elsevier.com](https://dev.elsevier.com/) | ✅ Live | Scopus search (26K+ journals) |
+| Springer Nature (OA) | [dev.springernature.com](https://dev.springernature.com/) | ⚠️ OA only | OA search + PDF (Metadata key expired) |
+
+**Note on Springer:** The Springer Metadata API key has expired. `search_springer` falls back to the Open Access API, which returns fewer (but freely accessible) results. Open Access PDF resolution still works.
 
 ## Usage
 
