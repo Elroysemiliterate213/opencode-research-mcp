@@ -3,13 +3,13 @@
   "mcp": {
     "research": {
       "type": "local",
-      "command": ["python", "research_bundle.py"],
+      "command": ["python", "/path/to/research_bundle.py"],
       "env": {
         "UNPAYWALL_EMAIL": "your.email@institution.edu",
         "ACADEMIX_EMAIL": "your.email@institution.edu",
-        "SEMANTIC_SCHOLAR_API_KEY": "your-key-from-api.semanticscholar.org",
-        "ELSEVIER_API_KEY": "your-key-from-dev.elsevier.com",
-        "SPRINGER_API_KEY": "your-key-from-dev.springernature.com"
+        "SEMANTIC_SCHOLAR_API_KEY": "s2k-xxxxxxxx",
+        "ELSEVIER_API_KEY": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "SPRINGER_API_KEY": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       },
       "enabled": true
     }
