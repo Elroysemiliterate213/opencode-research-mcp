@@ -338,7 +338,10 @@ async def search_literature(
     cite_walk_max_papers: int = 3,
     check_scihub: bool = False,
 ) -> dict[str, Any]:
-    """Search 6 major academic sources, deduplicate, rank, and optionally walk citations.
+    """Search up to 8 academic sources, deduplicate, rank, and optionally walk citations.
+
+    Base sources (always active): arXiv, Semantic Scholar, OpenAlex, CrossRef, PubMed, Unpaywall.
+    Conditional sources (when API keys set): Scopus (ELSEVIER_API_KEY), Springer (SPRINGER_API_KEY).
 
     Returns paper metadata (title, authors, year, abstract, DOI, citation count, is_open_access).
     Use extract_sections to read specific sections from papers (saves ~80% tokens vs full text).
@@ -800,13 +803,14 @@ async def search_specific_sources(
     max_results_per_source: int = 10,
     year: str | None = None,
 ) -> dict[str, Any]:
-    """Directly search named databases when source control matters.
+    """Search any of 21+ databases directly when source control matters.
 
-    Sources: arxiv, semantic, openalex, crossref, dblp, pubmed, pmc, europepmc,
+    Available sources: arxiv, semantic, openalex, crossref, dblp, pubmed, pmc, europepmc,
     biorxiv, medrxiv, core, openaire, doaj, base, hal, zenodo, ssrn, unpaywall,
-    scopus, springer.
+    scopus, springer, iacr, citeseerx.
 
-    Scopus and Springer require ELSEVIER_API_KEY and SPRINGER_API_KEY env vars.
+    Scopus requires ELSEVIER_API_KEY. Springer requires SPRINGER_API_KEY.
+    All others work without API keys.
     """
     source_list = [s.strip() for s in sources.split(",")]
     paper_search_sources = [s for s in source_list if s not in ("scopus", "springer")]
