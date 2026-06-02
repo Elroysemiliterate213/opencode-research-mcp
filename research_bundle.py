@@ -10,6 +10,8 @@ import asyncio
 import hashlib
 import json
 import os
+import random
+import re
 import sys
 import time
 from collections import OrderedDict, deque
@@ -18,6 +20,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
+
 from publisher_apis import _get_client, search_scopus, search_springer, springer_resolve_oa
 
 from fastmcp import FastMCP  # noqa: E402
@@ -25,6 +29,37 @@ from fastmcp import FastMCP  # noqa: E402
 from academix.aggregator import AcademicAggregator  # noqa: E402
 from academix import server as academix_server  # noqa: E402
 from paper_search_mcp import server as paper_search  # noqa: E402
+
+# ID format patterns (used for source auto-detection in read_paper)
+ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
+DOI_RE = re.compile(r"^10\.\d{4,}/\S+$")
+PMID_RE = re.compile(r"^PMID:\d+$|^\d{4,9}$")
+
+# Shared config
+UNPAYWALL_EMAIL = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
+PDF_MAGIC = b"%PDF-"
+
+# Map of source name -> paper_search reader function (built once after import)
+_READERS: dict[str, Any] = {}
+
+
+def _get_reader(source: str):
+    """Lazy-init reader registry; returns the reader callable or None."""
+    if not _READERS:
+        _READERS.update({
+            "arxiv": paper_search.read_arxiv_paper,
+            "semantic": paper_search.read_semantic_paper,
+            "biorxiv": paper_search.read_biorxiv_paper,
+            "medrxiv": paper_search.read_medrxiv_paper,
+            "iacr": paper_search.read_iacr_paper,
+            "openaire": paper_search.read_openaire_paper,
+            "citeseerx": paper_search.read_citeseerx_paper,
+            "doaj": paper_search.read_doaj_paper,
+            "base": paper_search.read_base_paper,
+            "zenodo": paper_search.read_zenodo_paper,
+            "hal": paper_search.read_hal_paper,
+        })
+    return _READERS.get(source)
 
 _academix: AcademicAggregator | None = None
 
@@ -94,30 +129,6 @@ _lookup_cache = _TTLCache(ttl_seconds=3600, max_entries=1024)
 
 
 # ---------------------------------------------------------------------------
-# Retry helper
-# ---------------------------------------------------------------------------
-
-async def _retry_async(
-    coro_factory,
-    max_retries: int = 3,
-    base_delay: float = 1.0,
-    max_delay: float = 30.0,
-) -> Any:
-    """Execute an async callable with exponential backoff retry."""
-    import random
-    last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            return await coro_factory()
-        except Exception as exc:
-            last_exc = exc
-            if attempt < max_retries:
-                delay = min(base_delay * (2 ** attempt) + random.uniform(0, 0.5), max_delay)
-                await asyncio.sleep(delay)
-    raise last_exc  # type: ignore[misc]
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -165,6 +176,32 @@ def _norm_id(value: Any) -> str:
     return str(value or "").strip().lower().removeprefix("https://doi.org/").removeprefix("http://doi.org/").removeprefix("doi:")
 
 
+def _safe_filename(value: str) -> str:
+    """Sanitize a string for use as a filename component (no path traversal)."""
+    # Replace path separators and control chars with underscores; keep alnum, _, -, .
+    s = re.sub(r"[^\w\-.]", "_", str(value or ""))
+    # Strip leading dots (defeats ../ traversal even if / were not stripped)
+    s = s.lstrip(".") or "paper"
+    return s
+
+
+def _save_pdf(content: bytes, paper_id: str, save_path: str) -> str:
+    """Write PDF content to disk and return the path."""
+    out_dir = Path(save_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{_safe_filename(paper_id)}.pdf"
+    out_file.write_bytes(content)
+    return str(out_file)
+
+
+def _is_pdf_response(resp, content: bytes) -> bool:
+    """Check if an HTTP response looks like a PDF."""
+    return (
+        "pdf" in resp.headers.get("content-type", "").lower()
+        or content[:5] == PDF_MAGIC
+    )
+
+
 def _paper_key(paper: dict[str, Any]) -> str:
     doi = _norm_id(paper.get("doi"))
     if doi:
@@ -175,32 +212,19 @@ def _paper_key(paper: dict[str, Any]) -> str:
     pmid = str(paper.get("pmid") or paper.get("paper_id") or "").strip()
     if pmid.startswith("PMID:"):
         return pmid.lower()
-    # Title-based fallback: use full normalized title + year for safer dedup
-    import re as _re
-    title = str(paper.get("title") or "").lower()
-    title = _re.sub(r"[^\w\s]", "", title)
+    # Title-based fallback: full normalized title + year for safer dedup
+    title = re.sub(r"[^\w\s]", "", str(paper.get("title") or "").casefold())
     title = " ".join(title.split())
     year = str(paper.get("year") or paper.get("published_date") or "")[:4]
     return f"title:{title}:{year}" if title else ""
-
-
-def _titles_similar(a: str, b: str, threshold: float = 0.92) -> bool:
-    """Check if two titles are similar enough to merge (handles minor formatting differences)."""
-    from difflib import SequenceMatcher
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio() >= threshold
 
 
 def _clean_abstract(value: Any) -> str:
     """Strip JATS/XML tags and clean up abstract text."""
     if not value:
         return ""
-    import re as _re
-    text = str(value)
-    # Remove JATS/XML tags but keep content
-    text = _re.sub(r"<[^>]+>", " ", text)
-    # Collapse whitespace
-    text = _re.sub(r"\s+", " ", text).strip()
-    return text
+    text = re.sub(r"<[^>]+>", " ", str(value))
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -212,7 +236,8 @@ def _to_int(value: Any, default: int = 0) -> int:
 
 def _normalize_paper(paper: dict[str, Any], source: str) -> dict[str, Any]:
     p = dict(paper)
-    raw = p.pop("raw", p)
+    # Only merge from "raw" sub-dict if it actually exists (avoid self-iteration)
+    raw = p.pop("raw", None)
     if isinstance(raw, dict):
         for k, v in raw.items():
             if k not in p or p[k] is None:
@@ -269,11 +294,10 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
     relevance_score = term overlap between query and title (0-10 scale)
     + citation boost (1-3 points for 50+/100+/500+ citations).
     """
-    import re as _re
     # Extract query terms for relevance scoring
-    query_terms = set()
+    query_terms: set[str] = set()
     if query:
-        q_clean = _re.sub(r"[^\w\s]", "", query.lower())
+        q_clean = re.sub(r"[^\w\s]", "", query.casefold())
         query_terms = {w for w in q_clean.split() if len(w) > 2}
 
     merged: dict[str, dict[str, Any]] = {}
@@ -291,7 +315,7 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
             # Compute relevance score from title term overlap + citation boost
             score = 0
             if query_terms and item.get("title"):
-                title_clean = _re.sub(r"[^\w\s]", "", item["title"].lower())
+                title_clean = re.sub(r"[^\w\s]", "", item["title"].casefold())
                 title_terms = set(title_clean.split())
                 overlap = len(title_terms & query_terms)
                 score = min(overlap * 3, 10)
@@ -338,10 +362,11 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
         ),
         reverse=True,
     )
-    # Filter out papers with relevance_score < 3 (no query term match + no citation boost)
-    # Score 0 = zero query terms in title AND <50 citations
-    # Score 1-2 = only from citation boost with no title match (rare)
-    ranked = [p for p in ranked if _to_int(p.get("relevance_score")) >= 1]
+    # Only apply relevance-score floor when a query is given (walk_citations passes None)
+    if query is not None:
+        # Score 0 = zero query terms in title AND <50 citations (unrelated)
+        # Score 1-2 = only from citation boost (rare but keep)
+        ranked = [p for p in ranked if _to_int(p.get("relevance_score")) >= 1]
     return ranked[:limit]
 
 
@@ -380,17 +405,19 @@ def _expand_query(query: str) -> list[str]:
 
 def _detect_source_from_paper(paper: dict[str, Any]) -> str:
     """Auto-detect the best source for full-text retrieval from paper metadata."""
-    arxiv_id = paper.get("arxiv_id") or paper.get("arxiv")
-    if arxiv_id:
+    arxiv_id = paper.get("arxiv_id") or paper.get("arxiv") or ""
+    if arxiv_id and ARXIV_ID_RE.match(arxiv_id):
         return "arxiv"
     doi = str(paper.get("doi") or "").lower()
     if "biorxiv" in doi:
         return "biorxiv"
     if "medrxiv" in doi:
         return "medrxiv"
-    # Check PMC before Semantic Scholar for PMIDs
+    if doi and DOI_RE.match(doi):
+        # Valid DOI but no bio/medrxiv prefix; let downstream OA fallbacks handle it
+        return ""
     pmid = str(paper.get("pmid") or "")
-    if pmid:
+    if pmid and PMID_RE.match(pmid):
         return "pmc"  # PMC has actual full text
     source_list = paper.get("sources") or []
     for s in source_list:
@@ -409,7 +436,7 @@ async def _resolve_oa_id(paper_id: str) -> str:
         return paper_id
     try:
         client = await _get_client()
-        oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
+        oa_email = UNPAYWALL_EMAIL
 
         # Try DOI lookup first
         if paper_id.startswith("10.") or paper_id.startswith("doi:"):
@@ -456,7 +483,7 @@ async def _search_openalex_direct(query: str, max_results: int = 50, year_from: 
     """Direct OpenAlex API search with full metadata. Returns normalized papers."""
     try:
         client = await _get_client()
-        oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
+        oa_email = UNPAYWALL_EMAIL
         filters = []
         if year_from:
             filters.append(f"from_publication_date:{year_from}-01-01")
@@ -523,7 +550,7 @@ async def _fetch_oa_by_id(oa_id: str, direction: str, limit: int) -> list[dict[s
     """Fetch citations from OpenAlex using a resolved W... work ID."""
     try:
         client = await _get_client()
-        oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
+        oa_email = UNPAYWALL_EMAIL
 
         if direction == "cited_by":
             resp = await client.get(
@@ -582,6 +609,9 @@ async def search_literature(
         year = f"-{year_to}"
 
     queries = _expand_query(query) if expand_queries else [query]
+    has_scopus = bool(os.environ.get("ELSEVIER_API_KEY"))
+    has_springer = bool(os.environ.get("SPRINGER_API_KEY"))
+    tasks_per_query = 2 + int(has_scopus) + int(has_springer)
 
     # Per-task: (coro, source_label)
     task_specs: list[tuple[Any, str]] = []
@@ -600,9 +630,9 @@ async def search_literature(
             sources=BEST_SOURCES,
             year=year,
         ), "paper-search"))
-        if os.environ.get("ELSEVIER_API_KEY"):
+        if has_scopus:
             task_specs.append((search_scopus(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None), "scopus"))
-        if os.environ.get("SPRINGER_API_KEY"):
+        if has_springer:
             task_specs.append((search_springer(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None), "springer"))
 
     try:
@@ -622,16 +652,13 @@ async def search_literature(
         raw_papers = data.get("papers", []) if isinstance(data, dict) else (out if isinstance(out, list) else [])
         return [_normalize_paper(p, source) for p in raw_papers]
 
-    q_idx = 0
-    for (out, source) in zip(outputs, [t[1] for t in task_specs]):
+    # Use modular arithmetic on iteration index (works regardless of which tasks errored)
+    for i, (out, source) in enumerate(zip(outputs, [t[1] for t in task_specs])):
+        q_idx = min(i // tasks_per_query, len(queries) - 1)
         if isinstance(out, Exception):
-            q_label = queries[min(q_idx, len(queries)-1)]
-            errors[f"{source}_{q_label}"] = str(out)
+            errors[f"{source}_{queries[q_idx]}"] = str(out)
         else:
             papers.extend(_extract_papers(out, source))
-        # Advance query index when we hit academix (first task for each query)
-        if source == "academix":
-            q_idx += 1
 
     merged = _merge_papers(papers, max_results, query)
 
@@ -666,14 +693,19 @@ async def walk_citations(
     direction: Literal["forward", "backward", "both"] = "forward",
     depth: int = 1,
     max_papers_per_hop: int = 10,
+    max_total: int = 200,
 ) -> dict[str, Any]:
     """Follow citation graphs forward (who cites) or backward (what it cites), multi-hop. Uses OpenAlex (highest success rate). Only walks most-cited papers for deeper hops."""
     visited: set[str] = set()
     all_papers: list[dict[str, Any]] = []
     queue: deque[tuple[str, int]] = deque([(paper_id, 0)])
     visited.add(paper_id)
+    truncated = False
 
     while queue:
+        if len(all_papers) >= max_total:
+            truncated = True
+            break
         current_id, current_depth = queue.popleft()
         if current_depth >= depth:
             continue
@@ -704,6 +736,9 @@ async def walk_citations(
             for paper in r[:max_papers_per_hop]:
                 if not isinstance(paper, dict):
                     continue
+                if len(all_papers) >= max_total:
+                    truncated = True
+                    break
                 pid = paper.get("doi") or paper.get("arxiv_id") or paper.get("paper_id") or ""
                 if not pid or pid in visited:
                     continue
@@ -714,10 +749,16 @@ async def walk_citations(
                 # Only queue highly-cited papers for deeper hops
                 if current_depth + 1 < depth and _to_int(paper.get("citation_count")) >= 10:
                     queue.append((pid, current_depth + 1))
+            if truncated:
+                break
+        if truncated:
+            break
 
     deduped = _merge_papers(all_papers, len(all_papers))
     return {
         "root_paper": paper_id,
+        "truncated": truncated,
+        "max_total": max_total,
         "direction": direction,
         "depth": depth,
         "total_found": len(deduped),
@@ -736,28 +777,17 @@ async def read_paper(
 ) -> dict[str, Any]:
     """Download and extract full text from a paper. Falls back through OA repositories, Unpaywall, Sci-Hub."""
     if source == "auto":
+        # Only pass an ID field if the value actually matches its expected format
+        # (e.g. a DOI like "10.1234/foo" must not be passed as arxiv_id).
         source = _detect_source_from_paper({
-            "arxiv_id": paper_id, "doi": doi, "paper_id": paper_id,
-            "sources": [paper_id],
+            "arxiv_id": paper_id if ARXIV_ID_RE.match(paper_id) else "",
+            "doi": paper_id if DOI_RE.match(paper_id) else doi,
+            "pmid": paper_id if PMID_RE.match(paper_id) else "",
         })
 
     result: dict[str, Any] = {"paper_id": paper_id, "source": source}
 
-    readers = {
-        "arxiv": paper_search.read_arxiv_paper,
-        "semantic": paper_search.read_semantic_paper,
-        "biorxiv": paper_search.read_biorxiv_paper,
-        "medrxiv": paper_search.read_medrxiv_paper,
-        "iacr": paper_search.read_iacr_paper,
-        "openaire": paper_search.read_openaire_paper,
-        "citeseerx": paper_search.read_citeseerx_paper,
-        "doaj": paper_search.read_doaj_paper,
-        "base": paper_search.read_base_paper,
-        "zenodo": paper_search.read_zenodo_paper,
-        "hal": paper_search.read_hal_paper,
-    }
-
-    reader = readers.get(source)
+    reader = _get_reader(source)
     if reader:
         try:
             text = await reader(paper_id, save_path=save_path)
@@ -787,7 +817,7 @@ async def read_paper(
             oa_url = None
             resp = await client.get(
                 f"https://api.openalex.org/works/doi:{doi}",
-                params={"mailto": os.environ.get("UNPAYWALL_EMAIL", "research@example.com")},
+                params={"mailto": UNPAYWALL_EMAIL},
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -799,16 +829,8 @@ async def read_paper(
                         oa_url = primary["pdf_url"]
             if oa_url:
                 pdf_resp = await client.get(oa_url, timeout=30.0)
-                if pdf_resp.status_code == 200 and (
-                    "pdf" in pdf_resp.headers.get("content-type", "")
-                    or pdf_resp.content[:5] == b"%PDF-"
-                ):
-                    from pathlib import Path as _P
-                    out_dir = _P(save_path)
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    out_file = out_dir / f"{paper_id.replace('/', '_')}.pdf"
-                    out_file.write_bytes(pdf_resp.content)
-                    result["download_path"] = str(out_file)
+                if pdf_resp.status_code == 200 and _is_pdf_response(pdf_resp, pdf_resp.content):
+                    result["download_path"] = _save_pdf(pdf_resp.content, paper_id, save_path)
                     result["success"] = True
                     result["oa_source"] = "openalex"
                     return result
@@ -820,49 +842,34 @@ async def read_paper(
             oa_url = await springer_resolve_oa(doi)
             if oa_url:
                 pdf_resp = await client.get(oa_url, timeout=30.0)
-                if pdf_resp.status_code == 200 and (
-                    "pdf" in pdf_resp.headers.get("content-type", "")
-                    or pdf_resp.content[:5] == b"%PDF-"
-                ):
-                    from pathlib import Path as _P
-                    out_dir = _P(save_path)
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    out_file = out_dir / f"{paper_id.replace('/', '_')}.pdf"
-                    out_file.write_bytes(pdf_resp.content)
-                    result["download_path"] = str(out_file)
+                if pdf_resp.status_code == 200 and _is_pdf_response(pdf_resp, pdf_resp.content):
+                    result["download_path"] = _save_pdf(pdf_resp.content, paper_id, save_path)
                     result["success"] = True
                     result["oa_source"] = "springer"
                     return result
         except Exception:
             pass
 
-        # Try multi-mirror Sci-Hub (if enabled)
+        # Try multi-mirror Sci-Hub (if enabled). Uses a fresh client with
+        # follow_redirects=True because the shared client may not allow it.
         if use_scihub:
-            import httpx as _httpx
             env_mirrors = os.environ.get("SCI_HUB_MIRRORS", "").strip()
             sci_hub_urls = (
                 [m.strip() for m in env_mirrors.split(",") if m.strip()]
                 if env_mirrors
                 else ["https://sci-hub.se", "https://sci-hub.st", "https://sci-hub.ru"]
             )
-            for mirror in sci_hub_urls:
-                try:
-                    async with _httpx.AsyncClient(follow_redirects=True, timeout=15.0) as sc:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as sc:
+                for mirror in sci_hub_urls:
+                    try:
                         resp = await sc.get(f"{mirror}/{doi}")
-                        if resp.status_code == 200:
-                            ct = resp.headers.get("content-type", "").lower()
-                            if "pdf" in ct or resp.content[:5] == b"%PDF-":
-                                from pathlib import Path as _P
-                                out_dir = _P(save_path)
-                                out_dir.mkdir(parents=True, exist_ok=True)
-                                out_file = out_dir / f"{paper_id.replace('/', '_')}.pdf"
-                                out_file.write_bytes(resp.content)
-                                result["download_path"] = str(out_file)
-                                result["success"] = True
-                                result["oa_source"] = f"scihub:{mirror}"
-                                return result
-                except Exception:
-                    continue
+                        if resp.status_code == 200 and _is_pdf_response(resp, resp.content):
+                            result["download_path"] = _save_pdf(resp.content, paper_id, save_path)
+                            result["success"] = True
+                            result["oa_source"] = f"scihub:{mirror}"
+                            return result
+                    except Exception:
+                        continue
 
     return result
 
