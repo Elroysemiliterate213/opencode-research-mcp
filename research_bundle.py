@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote, urljoin
 
 import httpx
 
@@ -379,6 +380,58 @@ def _extract_pdf_text(pdf_path: str) -> str:
         return ""
 
 
+_TITLE_STOPWORDS = {
+    "the", "and", "for", "from", "with", "into", "through", "using", "about",
+    "method", "scheme", "paper", "study", "analysis", "towards", "toward",
+}
+
+
+def _title_keywords(title: str) -> list[str]:
+    """Extract significant title words used to verify that a downloaded PDF is the right paper."""
+    words = re.findall(r"[a-z0-9]+", (title or "").casefold())
+    out: list[str] = []
+    for w in words:
+        if len(w) < 4 or w in _TITLE_STOPWORDS:
+            continue
+        if w not in out:
+            out.append(w)
+    return out[:8]
+
+
+def _verify_text_matches_title(text: str, title: str) -> dict[str, Any]:
+    """Check whether extracted PDF text plausibly matches the requested paper title.
+
+    This prevents false positives from repository fallbacks that return a semantically
+    related but wrong PDF. If no title is supplied, verification is skipped.
+    """
+    keywords = _title_keywords(title)
+    if not keywords:
+        return {"checked": False, "match": True, "reason": "no title keywords"}
+    haystack = (text or "")[:5000].casefold()
+    matched = [k for k in keywords if k in haystack]
+    # Require at least 3 title keywords, or all keywords for very short titles.
+    needed = min(3, len(keywords))
+    return {
+        "checked": True,
+        "match": len(matched) >= needed,
+        "keywords": keywords,
+        "matched": matched,
+        "needed": needed,
+    }
+
+
+def _pdf_result_from_path(path: str, title: str = "") -> dict[str, Any]:
+    """Extract + verify text from a downloaded PDF path."""
+    text = _extract_pdf_text(path)
+    verification = _verify_text_matches_title(text, title)
+    return {
+        "text": text,
+        "text_length": len(text),
+        "verification": verification,
+        "verified": bool(text) and verification.get("match", True),
+    }
+
+
 def _is_pdf_response(resp, content: bytes) -> bool:
     """Check if an HTTP response looks like a PDF."""
     return (
@@ -402,6 +455,59 @@ def _paper_key(paper: dict[str, Any]) -> str:
     title = " ".join(title.split())
     year = str(paper.get("year") or paper.get("published_date") or "")[:4]
     return f"title:{title}:{year}" if title else ""
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values:
+        if not v or v in seen:
+            continue
+        seen.add(v)
+        out.append(v)
+    return out
+
+
+def _browser_candidate_urls(doi: str = "", url: str = "") -> list[str]:
+    """Generate likely publisher/PDF URLs for browser_download."""
+    candidates: list[str] = []
+    doi = (doi or "").strip()
+    if url:
+        candidates.append(url.strip())
+    if doi:
+        d = doi.removeprefix("doi:").strip()
+        d_lower = d.lower()
+        candidates.append(f"https://doi.org/{d}")
+        if d_lower.startswith("10.18653/v1/"):
+            acl_id = d.split("/")[-1]
+            candidates.extend([
+                f"https://aclanthology.org/{acl_id}.pdf",
+                f"https://www.aclweb.org/anthology/{acl_id}.pdf",
+            ])
+        if d_lower.startswith("10.1162/"):
+            candidates.append(f"https://www.mitpressjournals.org/doi/pdf/{d}")
+        if d_lower.startswith("10.3233/"):
+            # IOS Press Argument & Computation content migrated behind SAGE DOI pages.
+            safe = d.replace("/", "/")
+            article_id = d_lower.split("/")[-1].replace("-", "")
+            candidates.extend([
+                f"https://journals.sagepub.com/doi/pdf/{safe}",
+                f"https://journals.sagepub.com/doi/{safe}",
+                f"https://content.iospress.com/articles/argument-and-computation/{article_id}",
+                f"https://content.iospress.com/download/argument-and-computation/{article_id}/id",
+            ])
+        if d_lower.startswith("10.1075/"):
+            suffix = d.split("/", 1)[1] if "/" in d else d
+            candidates.extend([
+                f"https://www.jbe-platform.com/content/journals/{d_lower}",
+                f"https://www.jbe-platform.com/content/journals/{d_lower}?crawler=true",
+                f"https://benjamins.com/catalog/{suffix}",
+            ])
+    return _dedupe_preserve_order(candidates)
+
+
+def _ezproxy_url(target_url: str, ezproxy: str) -> str:
+    return f"{ezproxy.rstrip('/')}/login?url={quote(target_url, safe='')}"
 
 
 def _clean_abstract(value: Any) -> str:
@@ -987,8 +1093,8 @@ def ping() -> dict[str, Any]:
     return {
         "status": "ok" if (has_s2 or has_scopus or has_springer) else "no-keys",
         "server": "research-mcp",
-        "version": "lean-v5",
-        "tools": ["search_literature", "walk_citations", "read_paper", "ping"],
+        "version": "lean-v6-browser",
+        "tools": ["search_literature", "walk_citations", "read_paper", "browser_download", "ping"],
         "api_keys": {
             "semantic_scholar": has_s2,
             "scopus": has_scopus,
@@ -1231,6 +1337,243 @@ async def walk_citations(
 
 
 @mcp.tool()
+async def browser_download(
+    doi: str = "",
+    url: str = "",
+    title: str = "",
+    save_path: str = "./downloads",
+    ezproxy: str = "https://ezproxy.lb.polyu.edu.hk",
+    profile_path: str = "",
+    timeout_seconds: int = 180,
+    headless: bool = False,
+    use_ezproxy: bool = True,
+) -> dict[str, Any]:
+    """Download a paywalled paper through a real browser session.
+
+    Uses Playwright with a persistent browser profile so institutional SSO cookies
+    survive across calls. First run may open a visible browser and require manual
+    PolyU login/2FA. Later runs reuse the saved EZproxy/SAML cookies.
+
+    This tool verifies the extracted PDF text against the requested title. It will
+    delete mismatched PDFs and return success=False rather than accepting a wrong
+    repository fallback as a valid paper.
+    """
+    candidates = _browser_candidate_urls(doi=doi, url=url)
+    if not candidates:
+        return {
+            "success": False,
+            "error": "browser_download requires doi or url",
+            "doi": doi,
+            "url": url,
+        }
+
+    out_dir = Path(save_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = Path(
+        profile_path
+        or os.environ.get("RESEARCH_MCP_BROWSER_PROFILE", "")
+        or (Path.home() / ".cache" / "research-mcp" / "browser-profile")
+    )
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    result: dict[str, Any] = {
+        "success": False,
+        "doi": doi,
+        "title": title,
+        "save_path": str(out_dir),
+        "profile_path": str(profile_dir),
+        "ezproxy": ezproxy,
+        "headless": headless,
+        "attempts": [],
+        "candidates": candidates,
+    }
+
+    try:
+        from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+    except Exception as exc:
+        result["error"] = f"playwright is not installed or not importable: {exc}"
+        return result
+
+    timeout_ms = max(30, min(timeout_seconds, 600)) * 1000
+    deadline = time.monotonic() + max(30, min(timeout_seconds, 600))
+
+    async def _try_save_pdf(body: bytes, source_url: str, source: str) -> dict[str, Any] | None:
+        if not body or body[:5] != PDF_MAGIC:
+            return None
+        paper_id = doi or title or "browser_download"
+        saved = _save_pdf(body, paper_id, str(out_dir))
+        pdf_result = _pdf_result_from_path(saved, title)
+        if pdf_result["verified"]:
+            return {
+                "success": True,
+                "doi": doi,
+                "title": title,
+                "download_path": saved,
+                "source": source,
+                "source_url": source_url,
+                **pdf_result,
+            }
+        try:
+            Path(saved).unlink(missing_ok=True)
+        except Exception:
+            pass
+        result["attempts"].append({
+            "url": source_url,
+            "source": source,
+            "status": "pdf-title-mismatch-or-empty-text",
+            "verification": pdf_result.get("verification"),
+            "text_length": pdf_result.get("text_length", 0),
+        })
+        return None
+
+    async def _wait_for_possible_sso(page) -> None:
+        """If an SSO/login page is visible, give the user time to finish it."""
+        while time.monotonic() < deadline:
+            try:
+                page_url = page.url.lower()
+                title_text = (await page.title()).lower()
+                content = (await page.content())[:5000].lower()
+            except Exception:
+                await asyncio.sleep(1)
+                continue
+            looks_like_login = (
+                "idp.polyu.edu.hk" in page_url
+                or "shibboleth authentication request" in content
+                or "sign in" in title_text
+                or "login" in title_text
+                or "password" in content
+            )
+            if not looks_like_login:
+                return
+            result["needs_login"] = True
+            await asyncio.sleep(2)
+
+    async def _collect_links(page) -> list[str]:
+        try:
+            links = await page.eval_on_selector_all(
+                "a",
+                """els => els.map(a => ({href: a.href || '', text: (a.innerText || a.textContent || '').trim()}))""",
+            )
+        except Exception:
+            return []
+        out: list[str] = []
+        for item in links:
+            href = str(item.get("href") or "")
+            text = str(item.get("text") or "").lower()
+            if not href:
+                continue
+            hlow = href.lower()
+            if (
+                ".pdf" in hlow
+                or "/doi/pdf" in hlow
+                or "download" in hlow
+                or "fulltext" in hlow
+                or text in ("pdf", "download pdf", "full text")
+                or "pdf" in text
+            ):
+                out.append(urljoin(page.url, href))
+        return _dedupe_preserve_order(out)
+
+    async with async_playwright() as p:
+        launch_kwargs = {
+            "headless": headless,
+            "accept_downloads": True,
+            "downloads_path": str(out_dir),
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        try:
+            context = await p.chromium.launch_persistent_context(
+                str(profile_dir), channel="chrome", **launch_kwargs
+            )
+        except Exception:
+            context = await p.chromium.launch_persistent_context(str(profile_dir), **launch_kwargs)
+
+        try:
+            page = context.pages[0] if context.pages else await context.new_page()
+            page.set_default_timeout(timeout_ms)
+            request_urls: list[str] = []
+
+            # First visit pages in the browser. This is where SSO happens.
+            for target in candidates:
+                if time.monotonic() >= deadline:
+                    break
+                visit_urls = [_ezproxy_url(target, ezproxy)] if use_ezproxy else []
+                visit_urls.append(target)
+                for visit_url in _dedupe_preserve_order(visit_urls):
+                    if time.monotonic() >= deadline:
+                        break
+                    try:
+                        response = await page.goto(
+                            visit_url,
+                            wait_until="domcontentloaded",
+                            timeout=max(5000, int((deadline - time.monotonic()) * 1000)),
+                        )
+                        await _wait_for_possible_sso(page)
+                        if response is not None:
+                            headers = {k.lower(): v for k, v in response.headers.items()}
+                            ct = headers.get("content-type", "").lower()
+                            result["attempts"].append({
+                                "url": visit_url,
+                                "status": response.status,
+                                "content_type": ct,
+                                "browser_url": page.url,
+                            })
+                            if response.status == 200 and "pdf" in ct:
+                                saved_result = await _try_save_pdf(await response.body(), visit_url, "browser-page")
+                                if saved_result:
+                                    return saved_result
+                        request_urls.append(page.url)
+                        request_urls.extend(await _collect_links(page))
+                    except PlaywrightTimeoutError:
+                        result["attempts"].append({"url": visit_url, "status": "timeout"})
+                    except Exception as exc:
+                        result["attempts"].append({"url": visit_url, "status": f"error:{type(exc).__name__}:{str(exc)[:120]}"})
+
+            # Then use the authenticated browser context's request client to fetch PDF URLs.
+            request_urls.extend(candidates)
+            for target in _dedupe_preserve_order(request_urls):
+                if time.monotonic() >= deadline:
+                    break
+                fetch_urls = [_ezproxy_url(target, ezproxy)] if use_ezproxy else []
+                fetch_urls.append(target)
+                for fetch_url in _dedupe_preserve_order(fetch_urls):
+                    if time.monotonic() >= deadline:
+                        break
+                    try:
+                        resp = await context.request.get(
+                            fetch_url,
+                            timeout=max(5000, int((deadline - time.monotonic()) * 1000)),
+                            max_redirects=10,
+                        )
+                        ct = (resp.headers.get("content-type") or "").lower()
+                        result["attempts"].append({
+                            "url": fetch_url,
+                            "status": resp.status,
+                            "content_type": ct,
+                            "source": "browser-request",
+                        })
+                        body = await resp.body()
+                        if resp.status == 200 and ("pdf" in ct or body[:5] == PDF_MAGIC):
+                            saved_result = await _try_save_pdf(body, fetch_url, "browser-request")
+                            if saved_result:
+                                return saved_result
+                    except Exception as exc:
+                        result["attempts"].append({"url": fetch_url, "status": f"request-error:{type(exc).__name__}:{str(exc)[:120]}"})
+        finally:
+            # Keep cookies/profile on disk, but close this browser process.
+            try:
+                await context.close()
+            except Exception:
+                pass
+
+    result["error"] = (
+        "browser_download could not get a verified PDF. If needs_login=True, rerun and finish "
+        "PolyU SSO in the opened browser window; cookies will persist for future calls."
+    )
+    return result
+
+
+@mcp.tool()
 async def read_paper(
     paper_id: str,
     source: str = "auto",
@@ -1276,9 +1619,13 @@ async def read_paper(
             )
             if text:
                 result["text"] = text
-                result["success"] = True
-                result["oa_source"] = source
-                return result
+                result["text_length"] = len(text)
+                result["verification"] = _verify_text_matches_title(text, title)
+                result["success"] = result["verification"].get("match", True)
+                if result["success"]:
+                    result["oa_source"] = source
+                    return result
+                result["fallbacks_tried"].append(f"{source}:title-mismatch")
             result["reader_empty"] = True
         except asyncio.TimeoutError:
             result["reader_error"] = f"reader timeout after {overall_deadline - (time.monotonic() - 30.0):.1f}s"
@@ -1301,13 +1648,17 @@ async def read_paper(
             if path and not str(path).startswith("Download failed") and not str(path).startswith("Error"):
                 result["download_path"] = path
                 # Extract text from the downloaded PDF (this is what the user actually wants)
-                result["text"] = _extract_pdf_text(path)
-                result["text_length"] = len(result["text"])
-                result["success"] = bool(result["text"])  # success requires real text
+                pdf_result = _pdf_result_from_path(path, title)
+                result.update(pdf_result)
+                result["success"] = pdf_result["verified"]
                 if result["success"]:
                     result["oa_source"] = "paper-search"
                     return result
-                result["fallbacks_tried"].append("paper_search:empty-text-after-extraction")
+                result["fallbacks_tried"].append("paper_search:empty-text-or-title-mismatch")
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except Exception:
+                    pass
             else:
                 result["download_path"] = path  # keep the error string for debugging
                 result["fallbacks_tried"].append("paper_search_fallback")
@@ -1352,12 +1703,16 @@ async def read_paper(
                     if pdf_resp.status_code == 200 and _is_pdf_response(pdf_resp, pdf_resp.content):
                         saved_path = _save_pdf(pdf_resp.content, paper_id, save_path)
                         result["download_path"] = saved_path
-                        result["text"] = _extract_pdf_text(saved_path)
-                        result["text_length"] = len(result["text"])
-                        if result["text"]:
+                        pdf_result = _pdf_result_from_path(saved_path, title)
+                        result.update(pdf_result)
+                        if pdf_result["verified"]:
                             result["success"] = True
                             result["oa_source"] = "openalex"
                             return result
+                        try:
+                            Path(saved_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
         except (asyncio.TimeoutError, Exception):
             pass
 
@@ -1378,12 +1733,16 @@ async def read_paper(
                     if pdf_resp.status_code == 200 and _is_pdf_response(pdf_resp, pdf_resp.content):
                         saved_path = _save_pdf(pdf_resp.content, paper_id, save_path)
                         result["download_path"] = saved_path
-                        result["text"] = _extract_pdf_text(saved_path)
-                        result["text_length"] = len(result["text"])
-                        if result["text"]:
+                        pdf_result = _pdf_result_from_path(saved_path, title)
+                        result.update(pdf_result)
+                        if pdf_result["verified"]:
                             result["success"] = True
                             result["oa_source"] = "springer"
                             return result
+                        try:
+                            Path(saved_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
         except (asyncio.TimeoutError, Exception):
             pass
 
@@ -1408,12 +1767,16 @@ async def read_paper(
                         if resp.status_code == 200 and _is_pdf_response(resp, resp.content):
                             saved_path = _save_pdf(resp.content, paper_id, save_path)
                             result["download_path"] = saved_path
-                            result["text"] = _extract_pdf_text(saved_path)
-                            result["text_length"] = len(result["text"])
-                            if result["text"]:
+                            pdf_result = _pdf_result_from_path(saved_path, title)
+                            result.update(pdf_result)
+                            if pdf_result["verified"]:
                                 result["success"] = True
                                 result["oa_source"] = f"scihub:{mirror}"
                                 return result
+                            try:
+                                Path(saved_path).unlink(missing_ok=True)
+                            except Exception:
+                                pass
                     except Exception:
                         continue
 

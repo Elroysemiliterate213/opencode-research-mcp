@@ -1,18 +1,20 @@
 # research-mcp
 
-A lean research MCP that bundles academic search, citation graph traversal, and full-text download into **3 tools**. Built on OpenAlex, Semantic Scholar, CrossRef, and 6 other academic indexes.
+A lean research MCP that bundles academic search, citation graph traversal, OA full-text download, and browser-based institutional download into **5 tools**. Built on OpenAlex, Semantic Scholar, CrossRef, and 6 other academic indexes.
 
-**What it does:** You ask a research question, it searches 8+ academic databases in parallel, removes duplicates, ranks by semantic + keyword relevance, and returns the best papers. Citation walk follows the graph forward and backward via OpenAlex. `read_paper` fetches full text with OA + Sci-Hub fallbacks.
+**What it does:** You ask a research question, it searches 8+ academic databases in parallel, removes duplicates, ranks by semantic + keyword relevance, and returns the best papers. Citation walk follows the graph forward and backward via OpenAlex. `read_paper` fetches OA full text. `browser_download` uses a real Playwright browser session for institutional SSO paywalls.
 
-**Why it's lean:** 3 tools cost ~150 tokens in tool surface vs ~12,000 for the underlying MCPs. Per the [DADL framework](https://arxiv.org/abs/2605.05247), each tool adds ~1.5% context pressure, so 3 tools = ~4.5% pressure, vs ~180% for the full surface.
+**Why it's lean:** 5 tools are still tiny compared with the ~12,000-token surface of the underlying MCPs. Per the [DADL framework](https://arxiv.org/abs/2605.05247), each tool adds context pressure, so we keep the surface focused: search, citations, OA read, browser paywall read, and ping.
 
-## 3 Tools
+## 5 Tools
 
 | # | Tool | Purpose |
 |---|------|---------|
 | 1 | `search_literature` | 8+ sources, dedup, semantic+keyword ranking, `mode` + `field` + `debug` params |
 | 2 | `walk_citations` | Multi-hop citation graph (forward/backward/both) via OpenAlex |
-| 3 | `read_paper` | Full-text download with auto-detect + OA + Sci-Hub fallbacks |
+| 3 | `read_paper` | OA-first full-text download with auto-detect + optional Sci-Hub fallback |
+| 4 | `browser_download` | Playwright browser download through institutional SSO/EZproxy, with PDF title verification |
+| 5 | `ping` | Cheap health check; use before expensive search/download calls |
 
 ## Search Modes
 
@@ -99,6 +101,8 @@ git clone https://github.com/chessy795/opencode-research-mcp.git
 cd opencode-research-mcp
 pip install -e .
 pip install fastembed  # optional; semantic relevance falls back to keyword-only
+pip install playwright # optional; required for browser_download
+playwright install chromium
 ```
 
 ### opencode Config
@@ -151,9 +155,18 @@ walk_citations(paper_id="10.48550/arxiv.1706.03762", direction="forward", depth=
 # Walk citations both directions
 walk_citations(paper_id="10.1038/nature14539", direction="both", max_papers_per_hop=15)
 
-# Read full text (auto-detects source, falls back through OA + Sci-Hub)
+# Read full text from OA sources (Sci-Hub opt-in only)
 read_paper(paper_id="10.48550/arxiv.1706.03762", use_scihub=True)
+
+# Browser download for institutional/EZproxy paywalls (opens visible browser on first SSO login)
+browser_download(
+    doi="10.3233/AAC-180037",
+    title="An Annotation Scheme for Rhetorical Figures",
+    save_path="./downloads",
+)
 ```
+
+`browser_download` stores cookies in `~/.cache/research-mcp/browser-profile` by default. First run may require manual SSO/2FA in the opened browser window; later calls reuse that institutional session. It verifies PDF text against the requested title and deletes mismatched PDFs.
 
 ## Sources
 
@@ -184,7 +197,7 @@ This design is grounded in the MCP tool selection literature:
 The `agents/researcher.md` file configures the researcher subagent for use with this MCP. Key settings:
 
 - **`task: deny`** — Prevents the researcher from spawning sub-sub-agents (avoids runaway cost spirals)
-- **Capped work scope** — Max 2 search + 2 walk + 1 read calls per request
+- **Capped work scope** — Max 2 search + 2 walk + 1 read + 1 browser_download call per request
 - **Stale tool references removed** — No `research_paper_lookup` (deleted in Round 1)
 
 Install: copy `agents/researcher.md` to `~/.config/opencode/agents/researcher.md`.

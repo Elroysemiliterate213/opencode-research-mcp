@@ -3,3 +3,4 @@ paper-search-mcp
 paper-distill-mcp
 fastmcp
 fastembed  # optional; graceful fallback if missing (semantic relevance)
+playwright  # optional; required only for browser_download institutional-access tool
