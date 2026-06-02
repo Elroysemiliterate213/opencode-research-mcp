@@ -356,6 +356,29 @@ def _save_pdf(content: bytes, paper_id: str, save_path: str) -> str:
     return str(out_file)
 
 
+def _extract_pdf_text(pdf_path: str) -> str:
+    """Extract text from a PDF using pypdf (pure Python, no system deps).
+    Returns the full text concatenated across all pages. Empty string on failure."""
+    if not pdf_path or not Path(pdf_path).exists():
+        return ""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(pdf_path)
+        parts: list[str] = []
+        for i, page in enumerate(reader.pages):
+            try:
+                parts.append(page.extract_text() or "")
+            except Exception:
+                continue
+            # Cap at ~50 pages to avoid pathological PDFs (also bounded by file size)
+            if i >= 50:
+                parts.append("\n\n[... truncated at 50 pages ...]")
+                break
+        return "\n\n".join(parts).strip()
+    except Exception:
+        return ""
+
+
 def _is_pdf_response(resp, content: bytes) -> bool:
     """Check if an HTTP response looks like a PDF."""
     return (
@@ -1214,40 +1237,87 @@ async def read_paper(
     doi: str = "",
     title: str = "",
     save_path: str = "./downloads",
-    use_scihub: bool = True,
+    use_scihub: bool = False,
 ) -> dict[str, Any]:
-    """Download and extract full text from a paper. Falls back through OA repositories, Unpaywall, Sci-Hub."""
+    """Download and extract full text from a paper. Falls back through OA repositories, Unpaywall, optionally Sci-Hub.
+
+    Capped at 30s total to avoid blocking the MCP client when many calls fire in parallel.
+    Sci-Hub is OFF by default — it adds 15-45s per call and is rate-limited. Set use_scihub=True
+    only when no OA copy is available and you accept the latency.
+    """
+    # Extract DOI from paper_id if not provided separately
+    if not doi and DOI_RE.match(paper_id):
+        doi = paper_id
+    # Extract arXiv ID from paper_id for fallback
+    arxiv_id = ""
+    if ARXIV_ID_RE.match(paper_id):
+        arxiv_id = paper_id
+    elif paper_id.lower().startswith("arxiv:"):
+        arxiv_id = paper_id.split(":", 1)[1]
+
     if source == "auto":
         # Only pass an ID field if the value actually matches its expected format
         # (e.g. a DOI like "10.1234/foo" must not be passed as arxiv_id).
         source = _detect_source_from_paper({
-            "arxiv_id": paper_id if ARXIV_ID_RE.match(paper_id) else "",
-            "doi": paper_id if DOI_RE.match(paper_id) else doi,
+            "arxiv_id": arxiv_id,
+            "doi": doi,
             "pmid": paper_id if PMID_RE.match(paper_id) else "",
         })
 
-    result: dict[str, Any] = {"paper_id": paper_id, "source": source}
+    result: dict[str, Any] = {"paper_id": paper_id, "source": source, "fallbacks_tried": []}
+    overall_deadline = time.monotonic() + 20.0  # hard cap so 5 parallel calls finish in ~20s wall time
 
     reader = _get_reader(source)
     if reader:
         try:
-            text = await reader(paper_id, save_path=save_path)
-            result["text"] = text
-            result["success"] = bool(text)
-            return result
+            text = await asyncio.wait_for(
+                reader(paper_id, save_path=save_path),
+                timeout=max(1.0, overall_deadline - time.monotonic()),
+            )
+            if text:
+                result["text"] = text
+                result["success"] = True
+                result["oa_source"] = source
+                return result
+            result["reader_empty"] = True
+        except asyncio.TimeoutError:
+            result["reader_error"] = f"reader timeout after {overall_deadline - (time.monotonic() - 30.0):.1f}s"
         except Exception as exc:
             result["reader_error"] = str(exc)
 
-    try:
-        path = await paper_search.download_with_fallback(
-            source=source, paper_id=paper_id, doi=doi, title=title,
-            save_path=save_path, use_scihub=use_scihub,
-        )
-        result["download_path"] = path
-        result["success"] = path is not None
-    except Exception as exc:
-        result["download_error"] = str(exc)
-        result["success"] = False
+    # Try paper_search.download_with_fallback (handles Unpaywall + multiple repositories)
+    remaining = max(1.0, overall_deadline - time.monotonic())
+    if remaining > 1.0:
+        try:
+            path = await asyncio.wait_for(
+                paper_search.download_with_fallback(
+                    source=source, paper_id=paper_id, doi=doi, title=title,
+                    save_path=save_path, use_scihub=use_scihub,
+                ),
+                timeout=remaining,
+            )
+            # download_with_fallback returns either a real path string OR an error message string.
+            # Treat error messages (starting with "Download failed") as failure.
+            if path and not str(path).startswith("Download failed") and not str(path).startswith("Error"):
+                result["download_path"] = path
+                # Extract text from the downloaded PDF (this is what the user actually wants)
+                result["text"] = _extract_pdf_text(path)
+                result["text_length"] = len(result["text"])
+                result["success"] = bool(result["text"])  # success requires real text
+                if result["success"]:
+                    result["oa_source"] = "paper-search"
+                    return result
+                result["fallbacks_tried"].append("paper_search:empty-text-after-extraction")
+            else:
+                result["download_path"] = path  # keep the error string for debugging
+                result["fallbacks_tried"].append("paper_search_fallback")
+        except asyncio.TimeoutError:
+            result["download_error"] = f"paper_search timeout after {remaining:.1f}s"
+            result["success"] = False
+        except Exception as exc:
+            result["download_error"] = str(exc)
+            result["fallbacks_tried"].append("paper_search_fallback")
+            result["success"] = False
 
     # Additional OA fallbacks (if DOI provided and main download failed)
     if not result.get("success") and doi:
@@ -1255,63 +1325,105 @@ async def read_paper(
 
         # Try OpenAlex OA URL (has open_access.oa_url for many papers)
         try:
-            oa_url = None
-            resp = await client.get(
-                f"https://api.openalex.org/works/doi:{doi}",
-                params={"mailto": UNPAYWALL_EMAIL},
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                oa_info = data.get("open_access", {})
-                oa_url = oa_info.get("oa_url")
-                if not oa_url:
-                    primary = data.get("primary_location", {})
-                    if primary and primary.get("pdf_url"):
-                        oa_url = primary["pdf_url"]
-            if oa_url:
-                pdf_resp = await client.get(oa_url, timeout=30.0)
-                if pdf_resp.status_code == 200 and _is_pdf_response(pdf_resp, pdf_resp.content):
-                    result["download_path"] = _save_pdf(pdf_resp.content, paper_id, save_path)
-                    result["success"] = True
-                    result["oa_source"] = "openalex"
-                    return result
-        except Exception:
+            remaining = max(1.0, overall_deadline - time.monotonic())
+            if remaining > 1.0:
+                oa_url = None
+                resp = await asyncio.wait_for(
+                    client.get(
+                        f"https://api.openalex.org/works/doi:{doi}",
+                        params={"mailto": UNPAYWALL_EMAIL},
+                    ),
+                    timeout=remaining,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    oa_info = data.get("open_access", {})
+                    oa_url = oa_info.get("oa_url")
+                    if not oa_url:
+                        primary = data.get("primary_location", {})
+                        if primary and primary.get("pdf_url"):
+                            oa_url = primary["pdf_url"]
+                result["fallbacks_tried"].append(f"openalex:{oa_url[:60] if oa_url else 'no-oa-url'}")
+                if oa_url:
+                    pdf_resp = await asyncio.wait_for(
+                        client.get(oa_url, timeout=15.0),
+                        timeout=max(1.0, overall_deadline - time.monotonic()),
+                    )
+                    if pdf_resp.status_code == 200 and _is_pdf_response(pdf_resp, pdf_resp.content):
+                        saved_path = _save_pdf(pdf_resp.content, paper_id, save_path)
+                        result["download_path"] = saved_path
+                        result["text"] = _extract_pdf_text(saved_path)
+                        result["text_length"] = len(result["text"])
+                        if result["text"]:
+                            result["success"] = True
+                            result["oa_source"] = "openalex"
+                            return result
+        except (asyncio.TimeoutError, Exception):
             pass
 
         # Try Springer OA
         try:
-            oa_url = await springer_resolve_oa(doi)
-            if oa_url:
-                pdf_resp = await client.get(oa_url, timeout=30.0)
-                if pdf_resp.status_code == 200 and _is_pdf_response(pdf_resp, pdf_resp.content):
-                    result["download_path"] = _save_pdf(pdf_resp.content, paper_id, save_path)
-                    result["success"] = True
-                    result["oa_source"] = "springer"
-                    return result
-        except Exception:
+            remaining = max(1.0, overall_deadline - time.monotonic())
+            if remaining > 1.0:
+                oa_url = await asyncio.wait_for(
+                    springer_resolve_oa(doi),
+                    timeout=remaining,
+                )
+                result["fallbacks_tried"].append(f"springer:{'ok' if oa_url else 'no-oa-url'}")
+                if oa_url:
+                    pdf_resp = await asyncio.wait_for(
+                        client.get(oa_url, timeout=15.0),
+                        timeout=max(1.0, overall_deadline - time.monotonic()),
+                    )
+                    if pdf_resp.status_code == 200 and _is_pdf_response(pdf_resp, pdf_resp.content):
+                        saved_path = _save_pdf(pdf_resp.content, paper_id, save_path)
+                        result["download_path"] = saved_path
+                        result["text"] = _extract_pdf_text(saved_path)
+                        result["text_length"] = len(result["text"])
+                        if result["text"]:
+                            result["success"] = True
+                            result["oa_source"] = "springer"
+                            return result
+        except (asyncio.TimeoutError, Exception):
             pass
 
-        # Try multi-mirror Sci-Hub (if enabled). Uses a fresh client with
-        # follow_redirects=True because the shared client may not allow it.
-        if use_scihub:
+        # Try Sci-Hub (only if explicitly enabled — slow + rate-limited)
+        if use_scihub and time.monotonic() < overall_deadline:
             env_mirrors = os.environ.get("SCI_HUB_MIRRORS", "").strip()
             sci_hub_urls = (
                 [m.strip() for m in env_mirrors.split(",") if m.strip()]
                 if env_mirrors
-                else ["https://sci-hub.se", "https://sci-hub.st", "https://sci-hub.ru"]
+                else ["https://sci-hub.se"]
             )
-            async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as sc:
+            # Tight timeout per mirror so we don't waste the whole budget on one
+            remaining = max(1.0, overall_deadline - time.monotonic())
+            per_mirror = min(8.0, remaining / max(len(sci_hub_urls), 1))
+            async with httpx.AsyncClient(follow_redirects=True, timeout=per_mirror) as sc:
                 for mirror in sci_hub_urls:
+                    if time.monotonic() >= overall_deadline:
+                        break
                     try:
                         resp = await sc.get(f"{mirror}/{doi}")
+                        result["fallbacks_tried"].append(f"scihub:{mirror}:{resp.status_code}")
                         if resp.status_code == 200 and _is_pdf_response(resp, resp.content):
-                            result["download_path"] = _save_pdf(resp.content, paper_id, save_path)
-                            result["success"] = True
-                            result["oa_source"] = f"scihub:{mirror}"
-                            return result
+                            saved_path = _save_pdf(resp.content, paper_id, save_path)
+                            result["download_path"] = saved_path
+                            result["text"] = _extract_pdf_text(saved_path)
+                            result["text_length"] = len(result["text"])
+                            if result["text"]:
+                                result["success"] = True
+                                result["oa_source"] = f"scihub:{mirror}"
+                                return result
                     except Exception:
                         continue
 
+    # If we get here, nothing worked
+    if not result.get("success"):
+        result["success"] = False
+        result["error"] = (
+            f"all fallbacks failed: tried {result.get('fallbacks_tried', [])}. "
+            f"paper is likely paywalled with no OA copy. try a different source or arXiv preprint."
+        )
     return result
 
 
