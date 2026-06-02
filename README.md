@@ -179,6 +179,16 @@ This design is grounded in the MCP tool selection literature:
 - [Hou et al. (2026)](https://arxiv.org/abs/2504.14947) — MCP security analysis: bloated tool surfaces create **16 attack vectors** through dangling or misdescribed tools.
 - [Gan & Sun (2025)](https://arxiv.org/abs/2505.03275) — RAG-MCP: tool routing quality degrades by **12% per 10 tools**. Bundled servers with <10 tools achieve **89% routing accuracy**.
 
+## Agent Config
+
+The `agents/researcher.md` file configures the researcher subagent for use with this MCP. Key settings:
+
+- **`task: deny`** — Prevents the researcher from spawning sub-sub-agents (avoids runaway cost spirals)
+- **Capped work scope** — Max 2 search + 2 walk + 1 read calls per request
+- **Stale tool references removed** — No `research_paper_lookup` (deleted in Round 1)
+
+Install: copy `agents/researcher.md` to `~/.config/opencode/agents/researcher.md`.
+
 ## License
 
 MIT
