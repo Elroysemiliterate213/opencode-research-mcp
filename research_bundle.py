@@ -403,20 +403,40 @@ def _verify_text_matches_title(text: str, title: str) -> dict[str, Any]:
 
     This prevents false positives from repository fallbacks that return a semantically
     related but wrong PDF. If no title is supplied, verification is skipped.
+
+    Two-stage check:
+      1. Exact title substring match (whitespace-normalized) in the first 5000 chars.
+         Academic papers always print the title on the first page; if a normalised
+         version of the requested title appears verbatim, the PDF is almost certainly
+         the right paper.
+      2. Keyword overlap: at least ~70% of the significant title words (min 4) must
+         appear in the first 5000 chars. This catches most wrong-paper fallbacks
+         (e.g. CORE returning a same-field paper that happens to share a few words).
     """
     keywords = _title_keywords(title)
     if not keywords:
         return {"checked": False, "match": True, "reason": "no title keywords"}
-    haystack = (text or "")[:5000].casefold()
-    matched = [k for k in keywords if k in haystack]
-    # Require at least 3 title keywords, or all keywords for very short titles.
-    needed = min(3, len(keywords))
+    head = (text or "")[:5000]
+    head_lc = head.casefold()
+    head_norm = re.sub(r"\s+", " ", head_lc)
+    title_norm = re.sub(r"\s+", " ", (title or "").casefold().strip())
+    # Strip punctuation that often differs between title and PDF rendering.
+    title_norm_clean = re.sub(r"[^\w\s]", "", title_norm)
+    head_norm_clean = re.sub(r"[^\w\s]", "", head_norm)
+    exact_match = bool(title_norm_clean) and title_norm_clean in head_norm_clean
+    matched = [k for k in keywords if k in head_lc]
+    # Stricter threshold: ~70% of significant keywords (rounded), min 4.
+    needed = max(4, int(round(0.7 * len(keywords))))
+    keyword_match = len(matched) >= needed
     return {
         "checked": True,
-        "match": len(matched) >= needed,
+        "match": exact_match or keyword_match,
+        "exact_match": exact_match,
+        "keyword_match": keyword_match,
         "keywords": keywords,
         "matched": matched,
         "needed": needed,
+        "matched_count": len(matched),
     }
 
 
