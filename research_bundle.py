@@ -282,11 +282,20 @@ def _passage_text(paper: dict[str, Any]) -> str:
 
 _author_hindex: dict[str, int] = {}  # author name -> h-index; 0 = unknown / not found
 _S2_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+# 429 backoff: when S2 rate-limits us, skip S2 for this many seconds
+_S2_QUOTA_UNTIL: float = 0.0
+_S2_QUOTA_COOLDOWN = 60.0  # seconds
 
 
 async def _lookup_author_hindex(name: str) -> int:
-    """Look up h-index for a single author via S2. Returns 0 on failure."""
+    """Look up h-index for a single author via S2. Returns 0 on failure.
+    Skips S2 entirely if we are in a 429 cooldown window. Does NOT cache 0
+    on rate limit (avoids poisoning the cache for the rest of the session)."""
+    global _S2_QUOTA_UNTIL
     if not name or not _S2_API_KEY:
+        return 0
+    # Skip if we are in a 429 cooldown window
+    if time.monotonic() < _S2_QUOTA_UNTIL:
         return 0
     if name in _author_hindex:
         return _author_hindex[name]
@@ -298,6 +307,10 @@ async def _lookup_author_hindex(name: str) -> int:
             params={"query": name, "limit": 1, "fields": "hIndex"},
             headers={"x-api-key": _S2_API_KEY},
         )
+        if resp.status_code == 429:
+            # Don't cache — just enter cooldown
+            _S2_QUOTA_UNTIL = time.monotonic() + _S2_QUOTA_COOLDOWN
+            return 0
         if resp.status_code != 200:
             _author_hindex[name] = 0
             return 0
@@ -311,13 +324,23 @@ async def _lookup_author_hindex(name: str) -> int:
 
 
 async def _boost_authors(papers: list[dict[str, Any]]) -> None:
-    """Fetch h-index for first author of each paper in parallel; mutates papers with 'first_author_h'."""
+    """Fetch h-index for first author of each paper in parallel; mutates papers with 'first_author_h'.
+    Capped at 8s to avoid blocking the main search response if S2 is slow."""
+    global _S2_QUOTA_UNTIL
     names = list({(p.get("authors") or [""])[0] for p in papers if p.get("authors")})
     if not names:
         return
-    results = await asyncio.gather(
-        *(_lookup_author_hindex(n) for n in names), return_exceptions=True
-    )
+    # Skip entirely if in S2 cooldown
+    if time.monotonic() < _S2_QUOTA_UNTIL:
+        return
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(_lookup_author_hindex(n) for n in names), return_exceptions=True),
+            timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        _S2_QUOTA_UNTIL = time.monotonic() + _S2_QUOTA_COOLDOWN
+        return
     h_map = {n: (r if isinstance(r, int) else 0) for n, r in zip(names, results)}
     for p in papers:
         first = (p.get("authors") or [""])[0]
@@ -925,6 +948,43 @@ async def _fetch_oa_by_id(oa_id: str, direction: str, limit: int) -> list[dict[s
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+def ping() -> dict[str, Any]:
+    """Cheap health check. Use this FIRST to verify the MCP is reachable
+    before doing expensive searches. Returns server status, configured API
+    keys, and cache state. No network calls, completes in <5ms.
+
+    Use the `status` field: "ok" = MCP is healthy, "degraded" = some
+    backends are down but MCP itself works, "no-keys" = no API keys
+    configured (results will be limited).
+    """
+    has_scopus = bool(os.environ.get("ELSEVIER_API_KEY"))
+    has_springer = bool(os.environ.get("SPRINGER_API_KEY"))
+    has_s2 = bool(_S2_API_KEY)
+    s2_in_cooldown = time.monotonic() < _S2_QUOTA_UNTIL
+    return {
+        "status": "ok" if (has_s2 or has_scopus or has_springer) else "no-keys",
+        "server": "research-mcp",
+        "version": "lean-v5",
+        "tools": ["search_literature", "walk_citations", "read_paper", "ping"],
+        "api_keys": {
+            "semantic_scholar": has_s2,
+            "scopus": has_scopus,
+            "springer": has_springer,
+            "unpaywall_email": UNPAYWALL_EMAIL != "research@example.com",
+        },
+        "s2_429_cooldown": s2_in_cooldown,
+        "s2_cooldown_remaining_s": round(max(0, _S2_QUOTA_UNTIL - time.monotonic()), 1) if s2_in_cooldown else 0,
+        "cache": {
+            "search_entries": len(_search_cache._store),
+            "lookup_entries": len(_lookup_cache._store),
+            "embed_entries": len(_embed_cache),
+            "author_hindex_cached": len(_author_hindex),
+        },
+        "fastembed_available": _get_embedder() is not None,
+    }
+
+
+@mcp.tool()
 async def search_literature(
     query: str,
     max_results: int = 25,
@@ -994,13 +1054,21 @@ async def search_literature(
         if has_springer:
             task_specs.append((search_springer(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None), "springer"))
 
-    try:
-        outputs = await asyncio.wait_for(
-            asyncio.gather(*[t[0] for t in task_specs], return_exceptions=True),
-            timeout=30.0,
-        )
-    except asyncio.TimeoutError:
-        outputs = [Exception("search timed out")] * len(task_specs)
+    # Per-source timeouts: one slow backend cannot block the others.
+    # We wrap each task in its own wait_for so a hung source is killed
+    # individually rather than failing the whole gather.
+    PER_SOURCE_TIMEOUT = 12.0
+
+    async def _guarded(coro):
+        try:
+            return await asyncio.wait_for(coro, timeout=PER_SOURCE_TIMEOUT)
+        except asyncio.TimeoutError:
+            return Exception(f"per-source timeout after {PER_SOURCE_TIMEOUT}s")
+        except Exception as e:
+            return e
+
+    guarded_tasks = [(_guarded(coro), label) for coro, label in task_specs]
+    outputs = await asyncio.gather(*[g[0] for g in guarded_tasks], return_exceptions=True)
 
     papers: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
@@ -1012,18 +1080,15 @@ async def search_literature(
         return [_normalize_paper(p, source) for p in raw_papers]
 
     # Use modular arithmetic on iteration index (works regardless of which tasks errored)
-    for i, (out, source) in enumerate(zip(outputs, [t[1] for t in task_specs])):
+    for i, (out, source) in enumerate(zip(outputs, [g[1] for g in guarded_tasks])):
         q_idx = min(i // tasks_per_query, len(queries) - 1)
         if isinstance(out, Exception):
             errors[f"{source}_{queries[q_idx]}"] = str(out)
         else:
             papers.extend(_extract_papers(out, source))
 
-    # Author reputation boost (parallel, cached, non-blocking on failure)
-    try:
-        await asyncio.wait_for(_boost_authors(papers), timeout=2.0)
-    except asyncio.TimeoutError:
-        pass
+    # Author reputation boost (8s cap, handled inside _boost_authors)
+    await _boost_authors(papers)
 
     merged = _merge_papers(papers, max_results, query, mode=mode, field=field, debug=debug)
 
@@ -1031,19 +1096,27 @@ async def search_literature(
     try:
         oa_papers = await asyncio.wait_for(
             _search_openalex_direct(query, max_results=max_results, year_from=year_from, year_to=year_to),
-            timeout=15.0,
+            timeout=10.0,
         )
         if oa_papers:
-            await asyncio.wait_for(_boost_authors(oa_papers), timeout=2.0)
+            await _boost_authors(oa_papers)
             all_with_oa = merged + oa_papers
             merged = _merge_papers(all_with_oa, max_results, query, mode=mode, field=field, debug=debug)
     except asyncio.TimeoutError:
-        pass
+        errors["openalex-direct"] = "openalex-direct timeout after 10s"
+
+    # Status field: ok if we got results, degraded if partial, failed if nothing
+    n_ok_sources = sum(1 for k in errors if not k.startswith("openalex-direct"))
+    if merged:
+        status = "ok" if not errors else ("degraded" if n_ok_sources < tasks_per_query else "ok")
+    else:
+        status = "failed"
 
     result = {
         "query": query,
         "mode": mode,
         "field": field,
+        "status": status,
         "queries_used": queries,
         "total_before_dedupe": len(papers),
         "returned": len(merged),
