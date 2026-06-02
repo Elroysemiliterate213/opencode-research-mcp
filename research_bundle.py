@@ -12,13 +12,13 @@ import json
 import os
 import sys
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from publisher_apis import search_scopus, search_springer, springer_resolve_oa
+from publisher_apis import _get_client, search_scopus, search_springer, springer_resolve_oa
 
 from fastmcp import FastMCP  # noqa: E402
 
@@ -54,12 +54,12 @@ mcp = FastMCP("research", lifespan=lifespan)
 # ---------------------------------------------------------------------------
 
 class _TTLCache:
-    """Simple in-memory TTL cache keyed by content hash."""
+    """Simple in-memory TTL cache with O(1) LRU eviction."""
 
     def __init__(self, ttl_seconds: int = 600, max_entries: int = 512):
         self._ttl = ttl_seconds
         self._max = max_entries
-        self._store: dict[str, tuple[float, Any]] = {}
+        self._store: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 
     def _key(self, *args: Any, **kwargs: Any) -> str:
         blob = json.dumps(args, sort_keys=True, default=str) + json.dumps(
@@ -76,14 +76,17 @@ class _TTLCache:
         if time.monotonic() - ts > self._ttl:
             del self._store[k]
             return None
+        # Mark as recently used
+        self._store.move_to_end(k)
         return val
 
     def set(self, value: Any, *args: Any, **kwargs: Any) -> None:
-        if len(self._store) >= self._max:
-            # Evict oldest
-            oldest_key = min(self._store, key=lambda k: self._store[k][0])
-            del self._store[oldest_key]
-        self._store[self._key(*args, **kwargs)] = (time.monotonic(), value)
+        k = self._key(*args, **kwargs)
+        if k in self._store:
+            self._store.move_to_end(k)
+        self._store[k] = (time.monotonic(), value)
+        if len(self._store) > self._max:
+            self._store.popitem(last=False)  # O(1) LRU eviction
 
 
 _search_cache = _TTLCache(ttl_seconds=600, max_entries=256)
@@ -172,14 +175,19 @@ def _paper_key(paper: dict[str, Any]) -> str:
     pmid = str(paper.get("pmid") or paper.get("paper_id") or "").strip()
     if pmid.startswith("PMID:"):
         return pmid.lower()
-    # Title-based dedup: only merge if titles are very similar (not just containing same words)
-    title = str(paper.get("title") or "").lower()
+    # Title-based fallback: use full normalized title + year for safer dedup
     import re as _re
+    title = str(paper.get("title") or "").lower()
     title = _re.sub(r"[^\w\s]", "", title)
     title = " ".join(title.split())
     year = str(paper.get("year") or paper.get("published_date") or "")[:4]
-    # Use first 80 chars of normalized title to avoid merging different papers with shared prefixes
-    return f"title:{title[:80]}:{year}"
+    return f"title:{title}:{year}" if title else ""
+
+
+def _titles_similar(a: str, b: str, threshold: float = 0.92) -> bool:
+    """Check if two titles are similar enough to merge (handles minor formatting differences)."""
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio() >= threshold
 
 
 def _clean_abstract(value: Any) -> str:
@@ -313,9 +321,11 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
         existing["citation_count"] = max(
             _to_int(existing.get("citation_count")), _to_int(item.get("citation_count"))
         )
-        # Update relevance score if this version has better title match
-        if "relevance_score" not in existing or item.get("relevance_score", 0) > existing.get("relevance_score", 0):
-            existing["relevance_score"] = item.get("relevance_score", 0)
+        # Take max of existing and new relevance_score (sources may differ in their scoring)
+        existing["relevance_score"] = max(
+            _to_int(existing.get("relevance_score")),
+            _to_int(item.get("relevance_score")),
+        )
     # Rank by: source_hits, relevance_score, has_abstract, citation_count, then year as tiebreaker
     ranked = sorted(
         merged.values(),
@@ -398,7 +408,6 @@ async def _resolve_oa_id(paper_id: str) -> str:
     if paper_id.startswith("W"):
         return paper_id
     try:
-        from publisher_apis import _get_client
         client = await _get_client()
         oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
 
@@ -446,7 +455,6 @@ async def _resolve_oa_id(paper_id: str) -> str:
 async def _search_openalex_direct(query: str, max_results: int = 50, year_from: int | None = None, year_to: int | None = None) -> list[dict[str, Any]]:
     """Direct OpenAlex API search with full metadata. Returns normalized papers."""
     try:
-        from publisher_apis import _get_client
         client = await _get_client()
         oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
         filters = []
@@ -465,39 +473,42 @@ async def _search_openalex_direct(query: str, max_results: int = 50, year_from: 
         if resp.status_code != 200:
             return []
         data = resp.json()
-        papers = []
-        for r in data.get("results", [])[:max_results]:
-            authors = []
-            for a in (r.get("authorships") or [])[:8]:
-                name = (a.get("author") or {}).get("display_name", "")
-                if name:
-                    authors.append(name)
-            abstract_inv = r.get("abstract_inverted_index")
-            abstract = ""
-            if abstract_inv:
-                positions = []
-                for word, pos_list in abstract_inv.items():
-                    for pos in pos_list:
-                        positions.append((pos, word))
-                positions.sort()
-                abstract = " ".join(w for _, w in positions)
-            oa_info = r.get("open_access", {}) or {}
-            pdf_url = oa_info.get("oa_url") or (r.get("primary_location") or {}).get("pdf_url")
-            papers.append({
-                "title": r.get("title", ""),
-                "authors": authors,
-                "year": (r.get("publication_date") or "")[:4] or None,
-                "doi": (r.get("doi") or "").removeprefix("https://doi.org/"),
-                "abstract": abstract,
-                "citation_count": _to_int(r.get("cited_by_count")),
-                "url": r.get("id", ""),
-                "pdf_url": pdf_url,
-                "is_open_access": bool(oa_info.get("is_oa")),
-                "openalex_id": r.get("id", ""),
-            })
+        papers = [_parse_oa_work(r, include_pdf=True) for r in data.get("results", [])[:max_results]]
         return [_normalize_paper(p, "openalex-direct") for p in papers]
     except Exception:
         return []
+
+
+def _parse_oa_work(r: dict[str, Any], include_pdf: bool = True) -> dict[str, Any]:
+    """Parse a single OpenAlex work into our normalized paper format."""
+    authors = []
+    for a in (r.get("authorships") or [])[:8]:
+        name = (a.get("author") or {}).get("display_name", "")
+        if name:
+            authors.append(name)
+    abstract = ""
+    abstract_inv = r.get("abstract_inverted_index")
+    if abstract_inv:
+        positions = []
+        for word, pos_list in abstract_inv.items():
+            for pos in pos_list:
+                positions.append((pos, word))
+        positions.sort()
+        abstract = " ".join(w for _, w in positions)
+    paper = {
+        "title": r.get("title", ""),
+        "authors": authors,
+        "year": (r.get("publication_date") or "")[:4] or None,
+        "doi": (r.get("doi") or "").removeprefix("https://doi.org/"),
+        "abstract": abstract,
+        "citation_count": _to_int(r.get("cited_by_count")),
+        "url": r.get("id", ""),
+    }
+    if include_pdf:
+        oa_info = r.get("open_access", {}) or {}
+        paper["pdf_url"] = oa_info.get("oa_url") or (r.get("primary_location") or {}).get("pdf_url")
+        paper["is_open_access"] = bool(oa_info.get("is_oa"))
+    return paper
 
 
 async def _openalex_citations(doi: str, direction: str = "cited_by", limit: int = 10) -> list[dict[str, Any]]:
@@ -511,7 +522,6 @@ async def _openalex_citations(doi: str, direction: str = "cited_by", limit: int 
 async def _fetch_oa_by_id(oa_id: str, direction: str, limit: int) -> list[dict[str, Any]]:
     """Fetch citations from OpenAlex using a resolved W... work ID."""
     try:
-        from publisher_apis import _get_client
         client = await _get_client()
         oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
 
@@ -538,31 +548,7 @@ async def _fetch_oa_by_id(oa_id: str, direction: str, limit: int) -> list[dict[s
         if resp.status_code != 200:
             return []
         results = resp.json().get("results", [])
-        papers = []
-        for r in results[:limit]:
-            authors = []
-            for a in (r.get("authorships") or [])[:5]:
-                name = (a.get("author") or {}).get("display_name", "")
-                if name:
-                    authors.append(name)
-            abstract_inv = r.get("abstract_inverted_index")
-            abstract = ""
-            if abstract_inv:
-                positions = []
-                for word, pos_list in abstract_inv.items():
-                    for pos in pos_list:
-                        positions.append((pos, word))
-                positions.sort()
-                abstract = " ".join(w for _, w in positions)
-            papers.append({
-                "title": r.get("title", ""),
-                "authors": authors,
-                "year": (r.get("publication_date") or "")[:4] or None,
-                "doi": (r.get("doi") or "").removeprefix("https://doi.org/"),
-                "abstract": abstract,
-                "citation_count": _to_int(r.get("cited_by_count")),
-                "url": r.get("id", ""),
-            })
+        papers = [_parse_oa_work(r, include_pdf=False) for r in results[:limit]]
         return [_normalize_paper(p, f"openalex-{direction}") for p in papers]
     except Exception:
         return []
@@ -579,14 +565,10 @@ async def search_literature(
     year_from: int | None = None,
     year_to: int | None = None,
     expand_queries: bool = True,
-    auto_cite_walk: bool = False,
-    cite_walk_depth: int = 2,
-    cite_walk_max_papers: int = 5,
-    check_scihub: bool = False,
 ) -> dict[str, Any]:
-    """Search academic papers across 8 sources (arXiv, Semantic Scholar, OpenAlex, CrossRef, Unpaywall, OpenAIRE, Scopus, Springer). Returns deduplicated results with abstracts, citation counts, and auto-walks citation graphs."""
+    """Search academic papers across 8 sources (arXiv, Semantic Scholar, OpenAlex, CrossRef, Unpaywall, OpenAIRE, Scopus, Springer). Returns deduplicated results with abstracts and citation counts."""
     # Check cache
-    cache_key = (query, max_results, year_from, year_to, expand_queries, auto_cite_walk)
+    cache_key = (query, max_results, year_from, year_to, expand_queries)
     cached = _search_cache.get(*cache_key)
     if cached is not None:
         return cached
@@ -601,69 +583,55 @@ async def search_literature(
 
     queries = _expand_query(query) if expand_queries else [query]
 
-    tasks = []
+    # Per-task: (coro, source_label)
+    task_specs: list[tuple[Any, str]] = []
     for q in queries:
-        tasks.extend([
-            academix_server.academic_search_papers(
-                query=q,
-                year_from=year_from,
-                year_to=year_to,
-                sort="relevance",
-                limit=min(max(max_results, 1), 100),
-                response_format="json",
-            ),
-            paper_search.search_papers(
-                query=q,
-                max_results_per_source=max(10, min(max_results, 50)),
-                sources=BEST_SOURCES,
-                year=year,
-            ),
-        ])
-        # Add publisher APIs when keys are set
+        task_specs.append((academix_server.academic_search_papers(
+            query=q,
+            year_from=year_from,
+            year_to=year_to,
+            sort="relevance",
+            limit=min(max(max_results, 1), 100),
+            response_format="json",
+        ), "academix"))
+        task_specs.append((paper_search.search_papers(
+            query=q,
+            max_results_per_source=max(10, min(max_results, 50)),
+            sources=BEST_SOURCES,
+            year=year,
+        ), "paper-search"))
         if os.environ.get("ELSEVIER_API_KEY"):
-            tasks.append(search_scopus(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None))
+            task_specs.append((search_scopus(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None), "scopus"))
         if os.environ.get("SPRINGER_API_KEY"):
-            tasks.append(search_springer(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None))
+            task_specs.append((search_springer(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None), "springer"))
 
-    # Use gather without wait_for to salvage partial results on timeout
     try:
         outputs = await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True),
+            asyncio.gather(*[t[0] for t in task_specs], return_exceptions=True),
             timeout=30.0,
         )
     except asyncio.TimeoutError:
-        outputs = [Exception("search timed out")] * len(tasks)
+        outputs = [Exception("search timed out")] * len(task_specs)
 
     papers: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
-    num_backends = 2 + bool(os.environ.get("ELSEVIER_API_KEY")) + bool(os.environ.get("SPRINGER_API_KEY"))
 
-    for i, out in enumerate(outputs):
-        q_idx = i // num_backends
-        backend = i % num_backends
-        q_label = queries[q_idx] if q_idx < len(queries) else query
+    def _extract_papers(out: Any, source: str) -> list[dict[str, Any]]:
+        """Extract papers from a backend response, tagged with source name."""
+        data = _json_load(out)
+        raw_papers = data.get("papers", []) if isinstance(data, dict) else (out if isinstance(out, list) else [])
+        return [_normalize_paper(p, source) for p in raw_papers]
 
+    q_idx = 0
+    for (out, source) in zip(outputs, [t[1] for t in task_specs]):
         if isinstance(out, Exception):
-            backend_names = ["academix", "paper-search", "scopus", "springer"]
-            errors[f"{backend_names[min(backend, len(backend_names)-1)]}_{q_label}"] = str(out)
-            continue
-
-        if backend == 0:
-            data = _json_load(out)
-            for paper in data.get("papers", []) if isinstance(data, dict) else []:
-                p = _normalize_paper(paper, "academix")
-                p["source_hits"] = max(_to_int(p.get("source_hits")), 2)  # Boost: OpenAlex ranking is proven
-                papers.append(p)
-        elif backend == 1:
-            data = _json_load(out)
-            for paper in data.get("papers", []) if isinstance(data, dict) else []:
-                papers.append(_normalize_paper(paper, "paper-search"))
-        elif backend == 2:
-            for paper in (out or []) if isinstance(out, list) else []:
-                papers.append(_normalize_paper(paper, "scopus"))
-        elif backend == 3:
-            for paper in (out or []) if isinstance(out, list) else []:
-                papers.append(_normalize_paper(paper, "springer"))
+            q_label = queries[min(q_idx, len(queries)-1)]
+            errors[f"{source}_{q_label}"] = str(out)
+        else:
+            papers.extend(_extract_papers(out, source))
+        # Advance query index when we hit academix (first task for each query)
+        if source == "academix":
+            q_idx += 1
 
     merged = _merge_papers(papers, max_results, query)
 
@@ -687,190 +655,6 @@ async def search_literature(
         "errors": errors,
         "papers": merged,
     }
-
-    if auto_cite_walk and merged:
-        # Walk by citation count — ensures highly-cited papers are walked, which
-        # surfaces their references (classics) and citing papers (follow-on work)
-        walk_candidates = sorted(merged, key=lambda p: -_to_int(p.get("citation_count")))
-        walk_ids = []
-        for p in walk_candidates[:cite_walk_max_papers]:
-            if p.get("source_hits", 0) >= 2:  # Only walk papers found by multiple sources
-                pid = p.get("doi") or p.get("arxiv_id") or p.get("paper_id")
-                if pid:
-                    walk_ids.append(pid)
-
-        async def _fetch_citations_s2(pid: str) -> list[dict[str, Any]]:
-            """Fetch citing papers from Semantic Scholar."""
-            try:
-                citations_data = _json_load(
-                    await academix_server.academic_get_citations(
-                        pid, limit=10, offset=0, response_format="json"
-                    )
-                )
-                citing = citations_data.get("citing_papers", []) if isinstance(citations_data, dict) else []
-                return [_normalize_paper(cp, "citation-walk-s2") for cp in citing[:10]]
-            except Exception:
-                return []
-
-        async def _fetch_citations_oa(pid: str) -> list[dict[str, Any]]:
-            """Fetch citing papers from OpenAlex (free, no rate limits)."""
-            try:
-                doi = pid if pid.startswith("10.") else ""
-                if not doi:
-                    return []
-                oa_id = await _resolve_oa_id(doi)
-                if not oa_id:
-                    return []
-                from publisher_apis import _get_client
-                client = await _get_client()
-                oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
-                resp = await client.get(
-                    "https://api.openalex.org/works",
-                    params={
-                        "filter": f"cites:{oa_id}",
-                        "per_page": 10,
-                        "mailto": oa_email,
-                    },
-                )
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
-                results = data.get("results", [])
-                papers = []
-                for r in results[:10]:
-                    authors = []
-                    for a in (r.get("authorships") or [])[:5]:
-                        name = (a.get("author") or {}).get("display_name", "")
-                        if name:
-                            authors.append(name)
-                    abstract_inv = r.get("abstract_inverted_index")
-                    abstract = ""
-                    if abstract_inv:
-                        positions = []
-                        for word, pos_list in abstract_inv.items():
-                            for pos in pos_list:
-                                positions.append((pos, word))
-                        positions.sort()
-                        abstract = " ".join(w for _, w in positions)
-                    papers.append({
-                        "title": r.get("title", ""),
-                        "authors": authors,
-                        "year": (r.get("publication_date") or "")[:4] or None,
-                        "doi": r.get("doi", ""),
-                        "abstract": abstract,
-                        "citation_count": _to_int((r.get("cited_by_count") or 0)),
-                        "url": r.get("id", ""),
-                    })
-                return [_normalize_paper(p, "citation-walk-oa") for p in papers]
-            except Exception:
-                return []
-
-        async def _fetch_references_oa(pid: str) -> list[dict[str, Any]]:
-            """Fetch references (backward) from OpenAlex."""
-            try:
-                from publisher_apis import _get_client
-                client = await _get_client()
-                oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
-                doi = pid if pid.startswith("10.") else ""
-                if not doi:
-                    return []
-                resp = await client.get(
-                    f"https://api.openalex.org/works/doi:{doi}",
-                    params={"mailto": oa_email},
-                )
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
-                refs = data.get("referenced_works", [])
-                if not refs:
-                    return []
-                # Batch fetch referenced works
-                ids_param = "|".join(refs[:20])
-                ref_resp = await client.get(
-                    "https://api.openalex.org/works",
-                    params={"filter": f"ids:{ids_param}", "per_page": 20, "mailto": oa_email},
-                )
-                if ref_resp.status_code != 200:
-                    return []
-                results = ref_resp.json().get("results", [])
-                papers = []
-                for r in results[:10]:
-                    authors = []
-                    for a in (r.get("authorships") or [])[:5]:
-                        name = (a.get("author") or {}).get("display_name", "")
-                        if name:
-                            authors.append(name)
-                    abstract_inv = r.get("abstract_inverted_index")
-                    abstract = ""
-                    if abstract_inv:
-                        positions = []
-                        for word, pos_list in abstract_inv.items():
-                            for pos in pos_list:
-                                positions.append((pos, word))
-                        positions.sort()
-                        abstract = " ".join(w for _, w in positions)
-                    papers.append({
-                        "title": r.get("title", ""),
-                        "authors": authors,
-                        "year": (r.get("publication_date") or "")[:4] or None,
-                        "doi": r.get("doi", ""),
-                        "abstract": abstract,
-                        "citation_count": _to_int((r.get("cited_by_count") or 0)),
-                        "url": r.get("id", ""),
-                    })
-                return [_normalize_paper(p, "reference-walk-oa") for p in papers]
-            except Exception:
-                return []
-
-        # Fetch forward (citing) and backward (references) in parallel
-        citation_tasks = []
-        for pid in walk_ids:
-            citation_tasks.append(_fetch_citations_s2(pid))
-            citation_tasks.append(_fetch_citations_oa(pid))
-            citation_tasks.append(_fetch_references_oa(pid))
-
-        try:
-            citation_results = await asyncio.wait_for(
-                asyncio.gather(*citation_tasks, return_exceptions=True),
-                timeout=15.0,
-            )
-        except asyncio.TimeoutError:
-            citation_results = []
-        citation_papers: list[dict[str, Any]] = []
-        for r in citation_results:
-            if isinstance(r, list):
-                citation_papers.extend(r)
-
-        if citation_papers:
-            # Citation walk papers get source_hits floor of 2 so they compete in ranking
-            for cp in citation_papers:
-                cp["citation_walk"] = True
-                cp["source_hits"] = max(_to_int(cp.get("source_hits")), 2)
-                # Recompute relevance_score with citation boost
-                cites = _to_int(cp.get("citation_count"))
-                score = _to_int(cp.get("relevance_score"))
-                if cites >= 500:
-                    score = min(score + 3, 10)
-                elif cites >= 100:
-                    score = min(score + 2, 10)
-                elif cites >= 50:
-                    score = min(score + 1, 10)
-                cp["relevance_score"] = score
-            all_papers = merged + citation_papers
-            result["papers"] = _merge_papers(all_papers, max_results + 10, query)
-            result["citation_walk_found"] = len(citation_papers)
-
-    if check_scihub:
-        try:
-            scihub_map = await _check_scihub_batch(result["papers"])
-            for p in result["papers"]:
-                doi = p.get("doi")
-                if doi and doi in scihub_map:
-                    p["scihub_available"] = scihub_map[doi]
-            result["scihub_checked"] = len(scihub_map)
-            result["scihub_available_count"] = sum(1 for v in scihub_map.values() if v)
-        except Exception:
-            pass
 
     _search_cache.set(result, *cache_key)
     return result
@@ -941,11 +725,6 @@ async def walk_citations(
     }
 
 
-async def _check_scihub_batch(papers: list[dict[str, Any]]) -> dict[str, bool]:
-    """Stub: Sci-Hub availability check. Disabled — use read_paper instead."""
-    return {}
-
-
 @mcp.tool()
 async def read_paper(
     paper_id: str,
@@ -1001,7 +780,6 @@ async def read_paper(
 
     # Additional OA fallbacks (if DOI provided and main download failed)
     if not result.get("success") and doi:
-        from publisher_apis import _get_client
         client = await _get_client()
 
         # Try OpenAlex OA URL (has open_access.oa_url for many papers)
@@ -1061,7 +839,12 @@ async def read_paper(
         # Try multi-mirror Sci-Hub (if enabled)
         if use_scihub:
             import httpx as _httpx
-            sci_hub_urls = ["https://sci-hub.se", "https://sci-hub.st", "https://sci-hub.ru"]
+            env_mirrors = os.environ.get("SCI_HUB_MIRRORS", "").strip()
+            sci_hub_urls = (
+                [m.strip() for m in env_mirrors.split(",") if m.strip()]
+                if env_mirrors
+                else ["https://sci-hub.se", "https://sci-hub.st", "https://sci-hub.ru"]
+            )
             for mirror in sci_hub_urls:
                 try:
                     async with _httpx.AsyncClient(follow_redirects=True, timeout=15.0) as sc:
