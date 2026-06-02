@@ -116,5 +116,87 @@ assert check("survey: only surveys",
              all(p.get("is_survey") for p in out_sv) and len(out_sv) > 0)
 
 
+# ---------- _detect_field ----------
+print("\n== _detect_field ==")
+assert check("detects CS", m._detect_field("transformer attention mechanism") == "cs")
+assert check("detects medical", m._detect_field("patient clinical trial cancer") == "medical")
+assert check("detects bio", m._detect_field("CRISPR gene editing") == "bio")
+assert check("detects social", m._detect_field("education policy in schools") == "social")
+assert check("defaults to general", m._detect_field("random gibberish") == "general")
+assert check("priority: medical before bio", m._detect_field("patient gene therapy") == "medical")
+
+
+# ---------- SOURCE_TIERS + _get_source_tier ----------
+print("\n== SOURCE_TIERS ==")
+assert check("scopus is tier 3", m.SOURCE_TIERS["scopus"] == 3)
+assert check("semantic is tier 3", m.SOURCE_TIERS["semantic"] == 3)
+assert check("arxiv is tier 2", m.SOURCE_TIERS["arxiv"] == 2)
+assert check("europepmc is tier 1", m.SOURCE_TIERS["europepmc"] == 1)
+# Field-aware: tier 1 biomedical only counts for medical/bio
+assert check("europepmc is tier 0 in cs field", m._get_source_tier("europepmc", "cs") == 0)
+assert check("europepmc is tier 1 in medical field", m._get_source_tier("europepmc", "medical") == 1)
+assert check("europepmc is tier 1 in bio field", m._get_source_tier("europepmc", "bio") == 1)
+assert check("unknown source is tier 0", m._get_source_tier("unknown", "general") == 0)
+
+
+# ---------- _is_rescued ----------
+print("\n== _is_rescued ==")
+high_cite = {"citation_count": 1000, "source_count": 1, "is_survey": False, "title": "X", "abstract": ""}
+assert check("high citations rescue", m._is_rescued(high_cite))
+multi = {"citation_count": 1, "source_count": 4, "is_survey": False, "title": "X", "abstract": ""}
+assert check("multi-source rescue", m._is_rescued(multi))
+survey = {"citation_count": 1, "source_count": 1, "is_survey": True, "title": "X", "abstract": ""}
+assert check("survey rescue", m._is_rescued(survey))
+exact = {"citation_count": 1, "source_count": 1, "is_survey": False, "title": "transformer review", "abstract": ""}
+assert check("exact title match rescue", m._is_rescued(exact, "transformer"))
+weak = {"citation_count": 1, "source_count": 1, "is_survey": False, "title": "Random", "abstract": ""}
+assert check("weak paper not rescued", not m._is_rescued(weak))
+
+
+# ---------- _should_drop_low_quality ----------
+print("\n== _should_drop_low_quality ==")
+assert check("drops weak paper",
+             m._should_drop_low_quality({"abstract": "", "citation_count": 2, "source_count": 1, "is_survey": False, "title": "X", "source_tier": 0}))
+assert check("keeps high-cite weak paper",
+             not m._should_drop_low_quality({"abstract": "", "citation_count": 600, "source_count": 1, "is_survey": False, "title": "X", "source_tier": 0}))
+assert check("keeps multi-source weak paper",
+             not m._should_drop_low_quality({"abstract": "", "citation_count": 2, "source_count": 3, "is_survey": False, "title": "X", "source_tier": 0}))
+assert check("keeps survey paper",
+             not m._should_drop_low_quality({"abstract": "", "citation_count": 2, "source_count": 1, "is_survey": True, "title": "X", "source_tier": 0}))
+assert check("keeps paper with abstract",
+             not m._should_drop_low_quality({"abstract": "has content", "citation_count": 0, "source_count": 1, "is_survey": False, "title": "X", "source_tier": 0}))
+assert check("keeps tier-3-only paper",
+             not m._should_drop_low_quality({"abstract": "", "citation_count": 2, "source_count": 1, "is_survey": False, "title": "X", "source_tier": 3}))
+
+
+# ---------- _merge_papers: source_tier ranking ----------
+print("\n== _merge_papers: source_tier ranking ==")
+tier3 = m._normalize_paper({"title": "Tier3 paper", "doi": "10.1/t3", "year": 2020, "abstract": "x", "citation_count": 10, "authors": ["X"], "venue": "X"}, "semantic")
+tier2 = m._normalize_paper({"title": "Tier2 paper", "doi": "10.1/t2", "year": 2020, "abstract": "x", "citation_count": 10, "authors": ["X"], "venue": "X"}, "arxiv")
+tier1 = m._normalize_paper({"title": "Tier1 paper", "doi": "10.1/t1", "year": 2020, "abstract": "x", "citation_count": 10, "authors": ["X"], "venue": "X"}, "europepmc")
+out = m._merge_papers([tier1, tier2, tier3], 10, query="test", mode="comprehensive", field="general")
+assert check("tier 3 ranks above tier 2 (general field)", out[0]["doi"] == "10.1/t3")
+assert check("tier 2 ranks above tier 1 (general field, biomed not counted)",
+             out[1]["doi"] == "10.1/t2" and out[2]["doi"] == "10.1/t1")
+
+
+# ---------- _merge_papers: field="medical" promotes tier-1 biomedical ----------
+print("\n== _merge_papers: field=medical tier weighting ==")
+out = m._merge_papers([tier1, tier2, tier3], 10, query="test", mode="comprehensive", field="medical")
+# In medical field, tier 1 (europepmc) is now tier 1, tier 2 (arxiv) is tier 2, tier 3 (semantic) is tier 3
+# Sort: tier3 > tier2 > tier1
+assert check("tier 3 still top in medical", out[0]["doi"] == "10.1/t3")
+
+
+# ---------- _merge_papers: debug mode ----------
+print("\n== _merge_papers: debug ==")
+out = m._merge_papers([tier3], 10, query="test", mode="comprehensive", debug=True)
+assert check("debug adds score_breakdown", "score_breakdown" in out[0])
+assert check("score_breakdown has semantic", "semantic" in out[0]["score_breakdown"])
+assert check("score_breakdown has final", "final" in out[0]["score_breakdown"])
+out2 = m._merge_papers([tier3], 10, query="test", mode="comprehensive", debug=False)
+assert check("no debug breakdown by default", "score_breakdown" not in out2[0])
+
+
 print(f"\n{'='*40}")
 print("All smoke tests passed." if all(True for _ in []) else "Some tests failed.")  # placeholder

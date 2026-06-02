@@ -432,12 +432,106 @@ SOURCE_PRECISION_BONUS = {
     "unpaywall": 0,
 }
 
+# Source tier (0-3). Higher = more trusted. Field-specific sources (tier 1)
+# only count for medical/bio queries via _get_source_tier().
+SOURCE_TIERS = {
+    # Tier 3: high-quality bibliographic databases
+    "scopus": 3, "springer": 3, "semantic": 3,
+    "openalex": 3, "openalex-direct": 3, "crossref": 3,
+    # Tier 2: broad but useful
+    "arxiv": 2, "openaire": 2, "doaj": 2, "unpaywall": 2,
+    # Tier 1: field-specific (biomedical) — only counts in medical/bio
+    "europepmc": 1, "pubmed": 1, "pmc": 1, "biorxiv": 1, "medrxiv": 1, "iacr": 1,
+    # Tier 0: aggregate/unknown
+    "academix": 0, "paper-search": 0, "citeseerx": 0, "base": 0, "zenodo": 0, "hal": 0,
+}
+
+# Field detection patterns (priority order: medical > bio > cs > social)
+_FIELD_PATTERNS = {
+    "medical": [
+        "patient", "clinical", "disease", "treatment", "drug", "therapy",
+        "diagnosis", "hospital", "trial", "randomized", "cohort",
+        "covid", "cancer", "diabetes", "cardiovascular",
+    ],
+    "bio": [
+        "gene", "protein", "cell", "molecular", "crispr", "biology",
+        "genome", "rna", "dna", "enzyme", "microbiome", "phylogenetic",
+    ],
+    "cs": [
+        "transformer", "neural", "deep learning", "machine learning", "nlp",
+        "computer vision", "llm", "language model", "neural network",
+        "backpropagation", "gradient", "embedding",
+    ],
+    "social": [
+        "education", "psychology", "sociology", "linguistics", "policy",
+        "social", "classroom", "student", "teacher", "cognitive",
+    ],
+}
+
+# Field-specific preferred sources (used for source-tier weighting, not API call list)
+FIELD_SOURCE_BIAS = {
+    "cs": ["arxiv", "semantic", "openalex", "openalex-direct", "crossref"],
+    "medical": ["pubmed", "europepmc", "pmc", "semantic", "openalex", "crossref"],
+    "bio": ["europepmc", "biorxiv", "medrxiv", "pmc", "semantic", "openalex"],
+    "social": ["scopus", "springer", "semantic", "openalex", "crossref", "doaj"],
+    "general": ["openalex", "openalex-direct", "semantic", "crossref", "arxiv"],
+}
+
+
+def _detect_field(query: str) -> str:
+    """Auto-detect field from query. Returns: cs, medical, bio, social, or general."""
+    q = (query or "").lower()
+    for field in ("medical", "bio", "cs", "social"):  # priority: most specific first
+        for pat in _FIELD_PATTERNS[field]:
+            if pat in q:
+                return field
+    return "general"
+
+
+def _get_source_tier(source: str, field: str) -> int:
+    """Get tier for a source, given the query's field. Tier 1 biomedical sources
+    only count for medical/bio fields; otherwise they're treated as tier 0."""
+    base = SOURCE_TIERS.get(source, 0)
+    if base == 1 and field not in ("medical", "bio"):
+        return 0
+    return base
+
+
+def _is_rescued(paper: dict[str, Any], query: str = "") -> bool:
+    """Rescue rules: keep these papers even when low-quality filter would drop them."""
+    if _to_int(paper.get("citation_count")) > 500:
+        return True
+    if _to_int(paper.get("source_count")) >= 3:
+        return True
+    if paper.get("is_survey"):
+        return True
+    if query and paper.get("title") and query.lower() in paper["title"].lower():
+        return True
+    if paper.get("source_tier", 0) >= 3:  # found in tier-3 source alone is enough
+        return True
+    return False
+
+
+def _should_drop_low_quality(paper: dict[str, Any], query: str = "") -> bool:
+    """Safe low-quality filter. Returns True if paper should be dropped.
+    Rescued papers always pass (high citations, multi-source, survey, exact title match)."""
+    if _is_rescued(paper, query):
+        return False
+    return (
+        not paper.get("abstract")
+        and _to_int(paper.get("citation_count")) < 5
+        and _to_int(paper.get("source_count")) <= 1
+        and _to_int(paper.get("source_tier")) < 2
+    )
+
 
 def _merge_papers(
     items: list[dict[str, Any]],
     limit: int,
     query: str | None = None,
     mode: str = "comprehensive",
+    field: str = "general",
+    debug: bool = False,
 ) -> list[dict[str, Any]]:
     """Deduplicate, score, and rank papers.
 
@@ -448,6 +542,8 @@ def _merge_papers(
       - "recent":         keep last 2 years; sort by citation_count desc
       - "survey":         keep review/survey/meta-analysis papers only
       - "comprehensive":  default behavior
+    Field is used for source-tier weighting (biomedical sources only count for medical/bio).
+    When debug=True, each paper includes a score_breakdown dict.
     """
     # Mode-specific filter (apply before scoring to skip wasted work)
     if mode == "survey":
@@ -475,11 +571,14 @@ def _merge_papers(
             continue
         existing = merged.get(key)
         if existing is None:
-            raw_hits = len(set(item.get("sources") or []))
+            sources = item.get("sources") or []
+            raw_hits = len(set(sources))
             precision_boost = 0
-            for s in (item.get("sources") or []):
+            for s in sources:
                 precision_boost = max(precision_boost, SOURCE_PRECISION_BONUS.get(s, 0))
             item["source_hits"] = raw_hits + precision_boost
+            # Source tier: max tier of any source, field-aware (tier-1 biomedical only counts for medical/bio)
+            item["source_tier"] = max((_get_source_tier(s, field) for s in sources), default=0)
 
             # Relevance scoring: blend semantic + keyword
             keyword_score = 0.0
@@ -497,20 +596,39 @@ def _merge_papers(
 
             # Citation boost
             cites = _to_int(item.get("citation_count"))
+            cite_boost = 0
             if cites >= 500:
-                score = min(score + 3, 10)
+                cite_boost = 3
             elif cites >= 100:
-                score = min(score + 2, 10)
+                cite_boost = 2
             elif cites >= 50:
-                score = min(score + 1, 10)
+                cite_boost = 1
+            score = min(score + cite_boost, 10)
             # Survey boost
-            if item.get("is_survey"):
+            survey_boost = 1 if item.get("is_survey") else 0
+            if survey_boost:
                 score = min(score + 1, 10)
             # Author reputation boost
             h = _to_int(item.get("first_author_h"))
-            if h >= 50:
+            author_boost = 1 if h >= 50 else 0
+            if author_boost:
                 score = min(score + 1, 10)
             item["relevance_score"] = score
+
+            if debug:
+                item["score_breakdown"] = {
+                    "semantic": round(sem_score, 3),
+                    "keyword": round(keyword_score, 3),
+                    "source_tier": item["source_tier"],
+                    "source_hits": item["source_hits"],
+                    "citation_boost": cite_boost,
+                    "survey_boost": survey_boost,
+                    "author_boost": author_boost,
+                    "final": score,
+                }
+            else:
+                # Strip if a previous debug call mutated this input dict
+                item.pop("score_breakdown", None)
             merged[key] = item
             continue
         new_sources = set(existing.get("sources") or []) | set(item.get("sources") or [])
@@ -520,9 +638,13 @@ def _merge_papers(
         for s in new_sources:
             precision_boost = max(precision_boost, SOURCE_PRECISION_BONUS.get(s, 0))
         existing["source_hits"] = raw_hits + precision_boost
-        for field in ("abstract", "doi", "arxiv_id", "pmid", "paper_id", "url", "pdf_url", "venue", "year", "keywords"):
-            if not existing.get(field) and item.get(field):
-                existing[field] = item[field]
+        existing["source_tier"] = max(
+            _to_int(existing.get("source_tier")),
+            max((_get_source_tier(s, field) for s in new_sources), default=0),
+        )
+        for f in ("abstract", "doi", "arxiv_id", "pmid", "paper_id", "url", "pdf_url", "venue", "year", "keywords"):
+            if not existing.get(f) and item.get(f):
+                existing[f] = item[f]
         if not existing.get("authors") and item.get("authors"):
             existing["authors"] = item["authors"]
         if not existing.get("is_survey") and item.get("is_survey"):
@@ -563,9 +685,11 @@ def _merge_papers(
         )
         ranked = sorted(merged.values(), key=sort_key, reverse=True)
     else:  # comprehensive
+        # source_tier first, then source_hits, then relevance, then abstract, then cites, then year
         ranked = sorted(
             merged.values(),
             key=lambda p: (
+                _to_int(p.get("source_tier")),
                 _to_int(p.get("source_hits")),
                 _to_int(p.get("relevance_score")),
                 1 if p.get("abstract") else 0,
@@ -575,8 +699,8 @@ def _merge_papers(
             reverse=True,
         )
 
-    # Quality filter (always on): drop papers with no abstract AND <5 citations
-    ranked = [p for p in ranked if p.get("abstract") or _to_int(p.get("citation_count")) >= 5]
+    # Safe low-quality filter (uses rescue rules: high-cite, multi-source, survey, exact title match, tier-3)
+    ranked = [p for p in ranked if not _should_drop_low_quality(p, query or "")]
 
     # Only apply relevance-score floor when a query is given (walk_citations passes None)
     if query is not None and mode == "comprehensive":
@@ -808,17 +932,29 @@ async def search_literature(
     year_to: int | None = None,
     expand_queries: bool = True,
     mode: Literal["seminal", "recent", "survey", "comprehensive"] = "comprehensive",
+    field: Literal["auto", "cs", "bio", "medical", "social", "general"] = "auto",
+    debug: bool = False,
 ) -> dict[str, Any]:
     """Search academic papers across 8 sources (arXiv, Semantic Scholar, OpenAlex, CrossRef, Unpaywall, OpenAIRE, Scopus, Springer). Returns deduplicated, semantically ranked results with abstracts and citation counts.
 
     mode:
+      - "comprehensive" (default): breadth-first
       - "seminal":       highly-cited foundational works (citations desc, oldest first)
       - "recent":        last 2 years, ranked by citations
       - "survey":        review/survey/meta-analysis papers only
-      - "comprehensive": default breadth-first search
+
+    field: "auto" detects from query (cs/medical/bio/social/general). Used for source-tier
+      weighting — biomedical tier-1 sources only count for medical/bio queries.
+
+    debug: when True, each paper includes a 'score_breakdown' dict (semantic, keyword,
+      source_tier, citation_boost, survey_boost, author_boost, final). Off by default.
     """
-    # Check cache (mode is part of the key)
-    cache_key = (query, max_results, year_from, year_to, expand_queries, mode)
+    # Detect field if auto
+    if field == "auto":
+        field = _detect_field(query)
+
+    # Check cache (mode + field are part of the key)
+    cache_key = (query, max_results, year_from, year_to, expand_queries, mode, field)
     cached = _search_cache.get(*cache_key)
     if cached is not None:
         return cached
@@ -889,7 +1025,7 @@ async def search_literature(
     except asyncio.TimeoutError:
         pass
 
-    merged = _merge_papers(papers, max_results, query, mode=mode)
+    merged = _merge_papers(papers, max_results, query, mode=mode, field=field, debug=debug)
 
     # Direct OpenAlex search (separate from paper_search wrapper for full metadata)
     try:
@@ -900,13 +1036,14 @@ async def search_literature(
         if oa_papers:
             await asyncio.wait_for(_boost_authors(oa_papers), timeout=2.0)
             all_with_oa = merged + oa_papers
-            merged = _merge_papers(all_with_oa, max_results, query, mode=mode)
+            merged = _merge_papers(all_with_oa, max_results, query, mode=mode, field=field, debug=debug)
     except asyncio.TimeoutError:
         pass
 
     result = {
         "query": query,
         "mode": mode,
+        "field": field,
         "queries_used": queries,
         "total_before_dedupe": len(papers),
         "returned": len(merged),

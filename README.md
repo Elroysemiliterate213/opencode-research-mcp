@@ -10,7 +10,7 @@ A lean research MCP that bundles academic search, citation graph traversal, and 
 
 | # | Tool | Purpose |
 |---|------|---------|
-| 1 | `search_literature` | 8+ sources, dedup, semantic+keyword ranking, `mode` param |
+| 1 | `search_literature` | 8+ sources, dedup, semantic+keyword ranking, `mode` + `field` + `debug` params |
 | 2 | `walk_citations` | Multi-hop citation graph (forward/backward/both) via OpenAlex |
 | 3 | `read_paper` | Full-text download with auto-detect + OA + Sci-Hub fallbacks |
 
@@ -20,10 +20,46 @@ A lean research MCP that bundles academic search, citation graph traversal, and 
 
 | Mode | Filter | Ranking |
 |------|--------|---------|
-| `"comprehensive"` (default) | — | Source hits → relevance → abstract → citations → year |
+| `"comprehensive"` (default) | — | Source tier → source hits → relevance → abstract → citations → year |
 | `"seminal"` | ≥10 citations | Citations desc, oldest first |
 | `"recent"` | Last 2 years | Citations desc, newest first |
 | `"survey"` | Review/survey/meta-analysis only | Relevance → survey flag → citations |
+
+## Field-Aware Source Tiering
+
+`search_literature` accepts `field="auto"` (default) which detects the query's field and applies field-aware source weighting. Sources are tiered:
+
+| Tier | Sources | When Counted |
+|------|---------|--------------|
+| 3 (top) | semantic, scopus, openalex, crossref, springer | All fields |
+| 2 (mid) | arxiv, unpaywall, openaire, doaj | All fields |
+| 1 (field-specific) | europepmc | Only for `medical` and `bio` fields |
+
+In CS/AI queries, Europe PMC papers are demoted to tier 0 (biomedical venue, irrelevant). In medical queries, Europe PMC papers get full tier-1 credit. The `field` param accepts `"cs"`, `"bio"`, `"medical"`, `"social"`, `"general"`, or `"auto"`.
+
+The safe filter (`_should_drop_low_quality`) drops papers with no abstract AND <5 citations AND ≤1 source AND tier<2, **unless rescued** by: ≥500 citations, ≥3 sources, is_survey, exact title match, or tier-3 source alone.
+
+## Debug Mode
+
+Set `debug=True` to get a `score_breakdown` per paper showing exactly how its `relevance_score` was computed:
+
+```json
+{
+  "relevance_score": 8.0,
+  "score_breakdown": {
+    "semantic": 0.72,
+    "keyword": 0.45,
+    "source_tier": 3,
+    "source_hits": 2,
+    "citation_boost": 2,
+    "survey_boost": 0,
+    "author_boost": 0,
+    "final": 8.0
+  }
+}
+```
+
+Useful for tuning queries, debugging low-quality results, or understanding ranking behavior.
 
 ## Relevance Scoring (0-10 per paper)
 
